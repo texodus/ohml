@@ -2,7 +2,7 @@
 -- TITLE
 -- One Hour ML, or How I Learned To Stop Worrying And Write An 
 -- ML To Javascript Compiler In About One Hour.
- 
+
 -- ABSTRACT
 -- In the spirit of [Write Yourself a Scheme in 48hrs](http://en.wikibooks.org/wiki/Write_Yourself_a_Scheme_in_48_Hours),
 -- this talk will detail the implementation of a simple compiler for an ML like language, targeting 
@@ -10,27 +10,45 @@
 -- library, the basics of a Hindley/Milner style type inference engine, and the [JMacro](http://www.haskell.org/haskellwiki/Jmacro)
 -- quasiquotation language for Javascript generation.  Stopwatches welcome!
 
--- OUTLINE
+-- SLIDES
 
 -- I. Introduction (10 min) ---------------------------------------------------
 
---   A. Quick intro, explicitly skip ML history, high level overview
+
+-- I.A. -----------------------------------------------------------------------
+
+-- Quick intro, explicitly skip ML history, high level overview 
+
+-------------------------------------------------------------------------------
+
+-- There are some extesions necessary - there necessity will be described 
+-- inline.
 
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE QuasiQuotes #-}
 
+-------------------------------------------------------------------------------
+
+-- There is one module.  We'll need the environment to take input, and a
+-- handful of elements from the `containers` and `mtl` libraris. 
+
 module Main where
+
+import System.Environment
 
 import Control.Applicative
 import Control.Monad
 import Control.Monad.State
 import Control.Arrow
 
-import System.Environment
+import qualified Data.Map  as M
+import qualified Data.List as L
 
-import Language.Javascript.JMacro 
+-------------------------------------------------------------------------------
+
+-- We'll also be using Parsec for parsing, and JMacro for code generation
 
 import qualified Text.Parsec.Token as T
 import Text.Parsec.String
@@ -38,22 +56,144 @@ import Text.Parsec.Language
 import Text.Parsec.Expr
 import Text.Parsec hiding ((<|>), many)
 
-import qualified Data.Map  as M
-import qualified Data.List as L
+import Language.Javascript.JMacro
 
---   B. What does the language look like, intro to the AST.  
+-- I.B. -----------------------------------------------------------------------
 
---     1. Let, Abs, App, vars and literals.
- 
+-- What does the language look like, intro to the AST. 
+
+-------------------------------------------------------------------------------
+
+-- The language itself will be a simple expression language
+
+samplePrograms :: [String]
+samplePrograms = [
+
+-------------------------------------------------------------------------------
+
+-- Simple types and infix operators will compile to their identical 
+-- underlying implementations.  Yes, that means there are only `Num`s!
+
+    "   2 + 2.0 == 4.0   ",
+
+-------------------------------------------------------------------------------
+
+-- You can introduce symbols with the `let` keyword.
+-- (Note: `\` is Haskell's multiline syntax)
+
+    "   let x = 1.0;     \
+    \   x + 1.0 == 2.0   ",
+
+-------------------------------------------------------------------------------
+
+-- Functions - we'll refer to this as "Abstraction" to sound cool!
+-- Also pictured: prefix application.
+
+    "   (fun x -> x + 4) 2 == 6   ",
+
+-------------------------------------------------------------------------------
+
+-- Pattern Matching (tm) FUN!
+
+    "   let fib = fun n ->                     \
+    \       match n with                       \
+    \       0 -> 0;                            \
+    \       1 -> 1;                            \
+    \       n -> fib (n - 1) + fib (n - 2);;   \
+    \   fib 13                                 ",
+
+-------------------------------------------------------------------------------
+
+-- And of course, our language will not do dumb things while parsing    
+
+    "   let truely = 4; (let func = fun x -> x + 2; func 4)   ",
+
+-------------------------------------------------------------------------------
+
+-- ... or while type checking
+
+    "   4 + \"whoops\"   ",
+
+    "   match 3 + 3 with \"gotcha\" -> false   ",
+
+-------------------------------------------------------------------------------
+
+-- ... or while generating javascript code.
+
+    "   let x = 3;                \
+    \   let f = fun y -> y + x;   \
+    \   let x = 2;                \
+    \   f 3 == 6                  "
+
+-------------------------------------------------------------------------------
+
+-- Other examples should be inserted here ...
+
+    ]
+
+-- I.C. -----------------------------------------------------------------------
+
+-- Compiler Architecture
+
+-------------------------------------------------------------------------------
+
+-- Compiler "Architecture"
+
+-------------------------------------------------------------------------------
+
+-- The compiler will be a simple program that takes a file name, and
+-- emits Javascript to stdout.
+
+main :: IO ()
+main  = do
+
+    source <- head <$> getArgs
+    case compile source of
+        Left  e  -> print e
+        Right js -> putStrLn js
+
+-------------------------------------------------------------------------------
+
+-- The structure of compilation is quite simple, expressed as a simple
+-- function composition.  
+
+compile :: String -> Either Err String
+compile = parseOhml >=> typeCheck >=> generateJs >=> toText
+
+newtype Err = Err String deriving Show
+
+
+-- II. --------------------------------------------------------------------
+
+-- The Abstract Syntax Tree, or AST in the 'biz.
+
+-------------------------------------------------------------------------------
+
+-- The Abstract Syntax Tree, or AST in the 'biz.
+-- We also say 'biz in da 'biz.
+
+-------------------------------------------------------------------------------
+
+-- The 10,000 ft view of an an OHML program is a simple expression. 
+-- Here, `AbsExpr` is an Abstraction, and `AppExpr` is an Application.
+-- (Note: We use GADT syntax solely for clarity - even though
+-- this is not necessary)
+
 data Expr where
 
     LetExpr :: Sym  -> Expr -> Expr -> Expr
     AppExpr :: Expr -> Expr -> Expr
     AbsExpr :: Sym  -> Expr -> Expr
-    VarExpr :: Val  -> Expr
+    VarExpr :: Val  -> Expr                     -- TODO spell me correktly!
     MatExpr :: Expr -> [(Patt, Expr)] -> Expr
 
     deriving (Show)
+
+-------------------------------------------------------------------------------
+
+-- Patterns are either `Val` or `Con` (which is really a decon, amirite?).
+-- Note we do not distinguish between literal and symbol matching, 
+-- because this is captured in the definition of `Val`
 
 data Patt where
 
@@ -62,12 +202,20 @@ data Patt where
 
     deriving (Show)
 
+-------------------------------------------------------------------------------
+
+-- ... which looks like this.
+
 data Val where
 
     SymVal  :: Sym -> Val
     LitVal  :: Lit -> Val
 
     deriving (Show)
+
+-------------------------------------------------------------------------------
+
+-- Symbols and literals, yada yada yada.
 
 newtype Sym = Sym String
 
@@ -81,63 +229,54 @@ data Lit where
 
     deriving (Show)
 
---     2. Simple example programs, also test cases.
-
-samplePrograms :: [String]
-samplePrograms = [
-
-    "2.0 + 2.0 == 4.0",
-
-    "let x = 1.0; x + 1.0 == 2.0",
-
-    "(fun x -> x + 4) 2 == 6",
-
-    "let fib = fun n ->\
-    \    match n with\
-    \    0 -> 0;\
-    \    1 -> 1;\
-    \    n -> fib (n - 1) + fib (n - 2);;\
-    \fib 13",
-
-    "let truely = 4; 4"
-
-    ]
-
---   C. Compiler architecture
-
-main :: IO ()
-main  = do
-
-    source <- head <$> getArgs
-    case compile source of
-        Left  e  -> print e
-        Right js -> putStrLn js
-
-compile :: String -> Either Err String
-compile x = parseOhml x >>= typeCheck >>= generateJs >>= toText
-
-toText :: JExpr  -> Either Err String
-toText = Right . show . renderJs 
-
-generateJs = Right . toJExpr
-
-unwrap (Right x) = putStrLn x >> putStrLn "----------------------"
 
 
--- II. Parsing (20 min) -------------------------------------------------------
+-- III. -----------------------------------------------------------------------
 
---   A. Overview of Parsec design, how Parser a forms an applicative functor
---      and why that's interesting.
+-- Parsing With Prejudice 
 
---     1. Natural similarity, left to right data constructor mirrors parsing
+-------------------------------------------------------------------------------
+
+-- ... goes to Hackage, downloades Parsec ...
+
+-------------------------------------------------------------------------------
+
+-- What is a Parser?  Well, this is a pretty good definition, which allows us
+-- to define some combinators that are also `MyParser`
+
+type MyParser a = String -> Either Err (a, String)
+
+-------------------------------------------------------------------------------
+
+-- TODO Explain `Parser` and `GenParser`
+
+-------------------------------------------------------------------------------
+
+-- TODO Applicative Functor, Functor & Monad members.
+
+-------------------------------------------------------------------------------
+
+-- With this in mind, we can define the parser simply with the `parse`
+-- from Parsec.
 
 parseOhml :: String -> Either Err Expr
-parseOhml = left (Err . show) . parse (exprP <* eof) "Parsing OHML" 
+parseOhml = left (Err . show) . parse grammar "Parsing OHML" 
 
-newtype Err = Err String deriving Show
+    where
+        grammar = spaces *> exprP <* eof
 
---   B. Language and Token modules
---      We don't need reservedOps because there are no user operators!
+-------------------------------------------------------------------------------
+
+-- TODO Explain combinators `*>` and `<*`
+
+-------------------------------------------------------------------------------
+
+-- There is some static info we need to define about OHML.  The language
+-- keywords ...
+
+keywords = [ "let", "true", "false", "fun", "match", "with" ]
+
+-- ... and operators, arranged in precedence order.
 
 ops = [ [ "^" ]
       , [ "*", "/" ]
@@ -145,11 +284,18 @@ ops = [ [ "^" ]
       , [ "<", "<=", ">=", ">", "==", "!=" ]
       , [ "&&", "||" ] ]
 
+-------------------------------------------------------------------------------
+
+-- Parsec provides lexing for free
+
 ohmlDef = emptyDef {
-    T.reservedNames = [ "let", "true", "false", "fun", "match", "with" ]
+    T.reservedNames   = keywords,
+    T.reservedOpNames = L.concat ops
 }
 
 T.TokenParser { .. } = T.makeTokenParser ohmlDef
+
+-------------------------------------------------------------------------------
 
 --   C. A Parser for OHML
 
@@ -293,9 +439,6 @@ infixr      4 `fn`
 fn         :: Type -> Type -> Type
 a `fn` b    = TAp (TAp tArrow a) b
 
-list       :: Type -> Type
-list t      = TAp tList t
-
 class HasKind t where
    kind :: t -> Kind
 instance HasKind Tyvar where
@@ -312,9 +455,6 @@ type Subst  = [(Tyvar, Type)]
 
 nullSubst  :: Subst
 nullSubst   = []
-
-(+->)      :: Tyvar -> Type -> Subst
-u +-> t     = [(u, t)]
 
 class Types t where
     apply :: Subst -> t -> t
@@ -354,7 +494,7 @@ mgu t1 t2             = fail ("types do not unify;\n" ++ show t1 ++ " and " ++ s
 varBind u t | t == TVar u      = return nullSubst
             | u `elem` tv t    = fail "occurs check fails"
             | kind u /= kind t = fail "kinds do not match"
-            | otherwise        = return (u +-> t)
+            | otherwise        = return [(u, t)]
 
 data Scheme = Forall [Kind] Type
               deriving Eq
@@ -363,14 +503,11 @@ instance Types Scheme where
     apply s (Forall ks qt) = Forall ks (apply s qt)
     tv (Forall ks qt)      = tv qt
 
-quantify      :: [Tyvar] -> Type -> Scheme
-quantify vs qt = Forall ks (apply s qt)
- where vs' = [ v | v <- tv qt, v `elem` vs ]
-       ks  = map kind vs'
-       s   = zip vs' (map TGen [0..])
-
-toScheme      :: Type -> Scheme
-toScheme     = Forall []
+--quantify      :: [Tyvar] -> Type -> Scheme
+--quantify vs qt = Forall ks (apply s qt)
+-- where vs' = [ v | v <- tv qt, v `elem` vs ]
+--       ks  = map kind vs'
+--       s   = zip vs' (map TGen [0..])
 
 data Assump = String :>: Scheme
 
@@ -381,8 +518,6 @@ instance Types Assump where
 find                 :: Monad m => String -> [Assump] -> m Scheme
 find i []             = fail ("unbound identifier: " ++ i)
 find i ((i':>:sc):as) = if i==i' then return sc else find i as
-
--- type TI a = TI (Either Err(Subst -> Int -> (Subst, Int, a)))
 
 type TI a = StateT (Subst, Int) (Either Err) a
 
@@ -454,7 +589,6 @@ exprCheck as (AbsExpr (Sym sym) expr) = do
     res <- exprCheck ((sym :>: Forall [] x) : as) expr
     return (x `fn` res)
 
-
 exprCheck as (VarExpr (SymVal (Sym sym))) =
     find sym as >>= freshInst
 
@@ -486,6 +620,8 @@ exprCheck as (MatExpr expr ((patt, res):es)) = do
 
 --   D. Generalization
 
+
+
 -- IV. Code Generation (25 minutes)
 
 --   A. Introduction to JMacro
@@ -493,6 +629,8 @@ exprCheck as (MatExpr expr ((patt, res):es)) = do
 --     1. Features overview, quasiquotation
 
 --     2. What you get for free by using JMacro/Javascript.
+
+generateJs = Right . toJExpr
 
 --   B. Marshalling the OHML AST into JExprs
 
@@ -594,7 +732,15 @@ instance ToJExpr Match where
 
     |]
 
- 
+
+-- UTILS
+
+
+toText :: JExpr  -> Either Err String
+toText = Right . show . renderJs  
+
+
+unwrap (Right x) = putStrLn x >> putStrLn "----------------------"
 
 -- V. Wrap up, run the samples from the intro.
 
