@@ -25,6 +25,7 @@ module Main where
 
 import Control.Applicative
 import Control.Monad
+import Control.Monad.State
 import Control.Arrow
 
 import System.Environment
@@ -246,13 +247,238 @@ exprP =
 
 
 
+
+
+
+
+
+
 -- III. Type Inference (20 min) -----------------------------------------------
 
 --   A. Overview of the algorithm, a TypeCheck monad
 --         (TODO) may have to drop polymorphic types to save time.
 
 typeCheck  :: Expr   -> Either Err Expr
-typeCheck   = Right
+typeCheck expr =
+    fmap (const expr . fst)
+         . flip runStateT (nullSubst, 0)
+         . exprCheck prelude
+         $ expr
+
+prelude :: [Assump]
+prelude = [ 
+    "==" :>: Forall [Star] (TGen 0 `fn` TGen 0 `fn` TGen 0),
+    "+"  :>: Forall []  (tDouble `fn` tDouble `fn` tDouble),
+    "-"  :>: Forall []  (tDouble `fn` tDouble `fn` tDouble)
+    ]   
+
+data Kind  = Star | Kfun Kind Kind deriving (Eq, Show)
+
+data Type  = TVar Tyvar | TCon Tycon | TAp  Type Type | TGen Int
+               deriving (Eq, Show)
+ 
+data Tyvar = Tyvar String Kind
+             deriving (Eq, Show)
+
+data Tycon = Tycon String Kind
+             deriving (Eq, Show)
+
+tString  = TCon (Tycon "String" Star)
+tBool    = TCon (Tycon "Boolean" Star)
+tDouble  = TCon (Tycon "Double" Star)
+tList    = TCon (Tycon "[]" (Kfun Star Star))
+tArrow   = TCon (Tycon "(->)" (Kfun Star (Kfun Star Star)))
+
+infixr      4 `fn`
+fn         :: Type -> Type -> Type
+a `fn` b    = TAp (TAp tArrow a) b
+
+list       :: Type -> Type
+list t      = TAp tList t
+
+class HasKind t where
+   kind :: t -> Kind
+instance HasKind Tyvar where
+   kind (Tyvar v k) = k
+instance HasKind Tycon where
+   kind (Tycon v k) = k
+instance HasKind Type where
+   kind (TCon tc) = kind tc
+   kind (TVar u)  = kind u
+   kind (TAp t _) = case (kind t) of
+                      (Kfun _ k) -> k
+
+type Subst  = [(Tyvar, Type)]
+
+nullSubst  :: Subst
+nullSubst   = []
+
+(+->)      :: Tyvar -> Type -> Subst
+u +-> t     = [(u, t)]
+
+class Types t where
+    apply :: Subst -> t -> t
+    tv    :: t -> [Tyvar]
+
+instance Types Type where
+    apply s (TVar u)  = case lookup u s of
+                         Just t  -> t
+                         Nothing -> TVar u
+    apply s (TAp l r) = TAp (apply s l) (apply s r)
+    apply s t         = t
+ 
+    tv (TVar u)  = [u]
+    tv (TAp l r) = tv l `L.union` tv r
+    tv t         = []
+
+instance Types a => Types [a] where
+    apply s = map (apply s)
+    tv      = L.nub . concat . map tv    
+
+infixr 4 @@
+(@@)       :: Subst -> Subst -> Subst
+s1 @@ s2    = [ (u, apply s1 t) | (u,t) <- s2 ] ++ s1
+
+mgu     :: Monad m => Type -> Type -> m Subst
+varBind :: Monad m => Tyvar -> Type -> m Subst
+
+mgu (TAp l r) (TAp l' r') = do s1 <- mgu l l'
+                               s2 <- mgu (apply s1 r) (apply s1 r')
+                               return (s2 @@ s1)
+mgu (TVar u) t        = varBind u t
+mgu t (TVar u)        = varBind u t
+mgu (TCon tc1) (TCon tc2)
+           | tc1==tc2 = return nullSubst
+mgu t1 t2             = fail ("types do not unify;\n" ++ show t1 ++ " and " ++ show t2)
+
+varBind u t | t == TVar u      = return nullSubst
+            | u `elem` tv t    = fail "occurs check fails"
+            | kind u /= kind t = fail "kinds do not match"
+            | otherwise        = return (u +-> t)
+
+data Scheme = Forall [Kind] Type
+              deriving Eq
+
+instance Types Scheme where
+    apply s (Forall ks qt) = Forall ks (apply s qt)
+    tv (Forall ks qt)      = tv qt
+
+quantify      :: [Tyvar] -> Type -> Scheme
+quantify vs qt = Forall ks (apply s qt)
+ where vs' = [ v | v <- tv qt, v `elem` vs ]
+       ks  = map kind vs'
+       s   = zip vs' (map TGen [0..])
+
+toScheme      :: Type -> Scheme
+toScheme     = Forall []
+
+data Assump = String :>: Scheme
+
+instance Types Assump where
+    apply s (i :>: sc) = i :>: (apply s sc)
+    tv (i :>: sc)      = tv sc
+
+find                 :: Monad m => String -> [Assump] -> m Scheme
+find i []             = fail ("unbound identifier: " ++ i)
+find i ((i':>:sc):as) = if i==i' then return sc else find i as
+
+-- type TI a = TI (Either Err(Subst -> Int -> (Subst, Int, a)))
+
+type TI a = StateT (Subst, Int) (Either Err) a
+
+getSubst   :: TI Subst
+getSubst    = fst <$> get
+
+unify      :: Type -> Type -> TI ()
+unify t1 t2 = do s <- getSubst
+                 u <- mgu (apply s t1) (apply s t2)
+                 extSubst u
+
+extSubst   :: Subst -> TI ()
+extSubst s' = do
+    (s, i) <- get
+    put (s' @@ s, i)
+
+newTVar    :: Kind -> TI Type
+newTVar k   = do
+    (s, i) <- get
+    put (s, i + 1)
+    return (TVar (Tyvar ("tvar_" ++ show i) k))
+
+freshInst               :: Scheme -> TI Type
+freshInst (Forall ks qt) = do ts <- mapM newTVar ks
+                              return (inst ts qt)
+
+class Instantiate t where
+  inst  :: [Type] -> t -> t
+
+instance Instantiate Type where
+  inst ts (TAp l r) = TAp (inst ts l) (inst ts r)
+  inst ts (TGen n)  = ts !! n
+  inst ts t         = t
+
+instance Instantiate a => Instantiate [a] where
+  inst ts = map (inst ts)
+
+litCheck :: Lit -> Type
+litCheck (StrLit _)  = tString
+litCheck (NumLit _)  = tDouble
+litCheck (BoolLit _) = tBool
+
+pattCheck :: Patt -> TI ([Assump], Type)
+
+pattCheck (ValPatt (SymVal (Sym s))) = do
+    t <- newTVar Star
+    return ([ s :>: Forall [] t ], t)
+
+pattCheck (ValPatt (LitVal l)) = do
+    return ([], litCheck l)
+
+exprCheck :: [Assump] -> Expr -> TI Type
+
+exprCheck as (LetExpr (Sym sym) val expr) = do
+    symT <- newTVar Star
+    valT <- exprCheck ((sym :>: Forall [] symT) : as) val
+    unify valT symT
+    exprCheck ((sym :>: Forall [] symT) : as) expr
+
+exprCheck as (AppExpr f x) = do
+    fT   <- exprCheck as f
+    xT   <- exprCheck as x
+    appT <- newTVar Star
+    unify (xT `fn` appT) fT
+    return appT
+
+exprCheck as (AbsExpr (Sym sym) expr) = do
+    x   <- newTVar Star
+    res <- exprCheck ((sym :>: Forall [] x) : as) expr
+    return (x `fn` res)
+
+
+exprCheck as (VarExpr (SymVal (Sym sym))) =
+    find sym as >>= freshInst
+
+exprCheck as (VarExpr (LitVal l)) =
+    return (litCheck l)
+
+exprCheck as (MatExpr expr ((patt, res):[])) = do
+    exprT <- exprCheck as expr
+    (pattAs, pattT) <- pattCheck patt
+    unify exprT pattT
+    exprCheck (pattAs ++ as) res
+
+exprCheck as (MatExpr expr ((patt, res):es)) = do
+    exprT <- exprCheck as expr
+    (pattAs, pattT) <- pattCheck patt
+    unify exprT pattT
+    resT  <- exprCheck (pattAs ++ as) res
+    esT   <- exprCheck as (MatExpr expr es)
+    unify resT esT
+    return resT
+    
+
+
+
 
 --   B. Instantiation of type variables
 
