@@ -323,11 +323,12 @@ instance ToJExpr Expr where
 
     |]
 
-    toJExpr (MatExpr val ((c, exp):cases)) = [jmacroE|
+    toJExpr (MatExpr val ((patt, expr):cases)) = [jmacroE|
 
         (function() {
-            if (`(Match val c)`)
-                return `(exp)` 
+            var scope = this;
+            if (`(Match val patt scope)`)
+                return `(expr)`
             else
                 return `(MatExpr val cases)`;
         })()
@@ -342,7 +343,7 @@ instance ToJExpr Expr where
 
     |]
 
-data Match = Match Expr Patt deriving (Show)
+data Match = Match Expr Patt JExpr deriving (Show)
 
 ref :: String -> JExpr
 ref = ValExpr . JVar . StrI
@@ -354,16 +355,16 @@ isInline _ = Nothing
 
 instance ToJExpr Match where
 
-    toJExpr (Match val (ValPatt (LitVal l))) =
+    toJExpr (Match val (ValPatt (LitVal l)) _) =
 
         [jmacroE| `(l)` == `(val)` |]
 
-    toJExpr (Match val (ValPatt (SymVal (Sym s)))) = [jmacroE|
+    toJExpr (Match val (ValPatt (SymVal (Sym s))) scope) = [jmacroE|
 
         (function() {
-            this[`(s)`] = `(val)`;
+            `(scope)`[`(s)`] = `(val)`;
             return true;
-        })() 
+        })()
 
     |]
 
