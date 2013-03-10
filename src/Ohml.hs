@@ -24,7 +24,7 @@
 
 -------------------------------------------------------------------------------
 
--- There are some extensions necessary - there necessity will be described 
+-- There are some extensions necessary - their necessity will be described 
 -- inline.
 
 {-# LANGUAGE GADTs #-}
@@ -39,6 +39,7 @@
 
 module Main where
 
+import System.IO.Unsafe
 import System.Environment
 
 import Control.Applicative
@@ -132,7 +133,7 @@ samplePrograms = [
 
     "   4 + \"whoops\"   ",
 
-    "   match 3 + 3 with \"gotcha\" -> false   ",
+    "   match 3 + 3 with \"gotcha\" -> false;   ",
 
 -------------------------------------------------------------------------------
 
@@ -172,7 +173,7 @@ main  = do
 
 -------------------------------------------------------------------------------
 
--- The structure of compilation is quite simple, expressed as a simple
+-- The structure of compilationcan be expressed as a simple
 -- function composition.  
 
 compile :: String -> Either Err String
@@ -224,11 +225,17 @@ data Bind where
 
 data Typ where
 
-    TypSym :: String -> Typ
+    TypSym :: TypeSym -> Typ
     TypVar :: String -> Typ
     TypApp :: Typ -> Typ -> Typ
 
     deriving (Show)  
+
+data TypeSym where 
+
+    TypeSym :: String -> TypeSym
+
+    deriving (Show)
 
 data TypSch where
 
@@ -245,7 +252,7 @@ data TypSch where
 data Patt where
 
     ValPatt :: Val -> Patt
-    ConPatt :: Typ -> [Patt] -> Patt
+    ConPatt :: TypeSym -> [Patt] -> Patt
 
     deriving (Show)
 
@@ -289,7 +296,7 @@ data Lit where
 -------------------------------------------------------------------------------
 
 -- What is a Parser?  Well, this is a pretty good definition, which allows us
--- to define some combinators that are also `MyParser`
+-- to define some combinators that also produce `MyParser`
 
 type MyParser a = String -> Either Err (a, String)
 
@@ -337,7 +344,8 @@ ops = [ [ "^" ]
 
 ohmlDef = emptyDef {
     T.reservedNames   = keywords,
-    T.reservedOpNames = L.concat ops
+    T.reservedOpNames = L.concat ops,
+    T.identStart      = lower <|> char '_'
 }
 
 T.TokenParser { .. } = T.makeTokenParser ohmlDef
@@ -353,7 +361,10 @@ symP = Sym <$> identifier
 -- (TODO explain `<|>`)
 
 valP :: Parser Val
-valP = (SymVal <$> symP) <|> (LitVal <$> litP) <|> (ConVal <$> typSymP)
+valP =
+    (SymVal <$> symP)
+        <|> (LitVal <$> litP) 
+        <|> ConVal . TypSym <$> typSymP
 
 -------------------------------------------------------------------------------
 
@@ -370,7 +381,7 @@ litP = stringL <|> numL
 -- TODO explain `<$>`
 
     where
-        stringL = StrLit  <$> stringLiteral
+        stringL = StrLit <$> stringLiteral
         numL    = NumLit . toDouble <$> naturalOrFloat
 
 -- with the help of some helpers.
@@ -389,8 +400,8 @@ pattP =
 
     where
         valPattP = ValPatt <$> valP
-        conPattP = flip ConPatt [] <$> typP
-        conPatsP = ConPatt <$> typP <*> many pattP <|> pattP
+        conPattP = flip ConPatt [] <$> typSymP
+        conPatsP = ConPatt <$> typSymP <*> many pattP <|> pattP
 
 -------------------------------------------------------------------------------
 
@@ -414,9 +425,9 @@ exprP =
 -- (TODO explain `reserved`)
 
         absExprP =
-            reserved "fun"
-                >>  AbsExpr
-                <$> symP
+            pure AbsExpr
+                <*  reserved "fun"
+                <*> symP
                 <*  reservedOp "->"
                 <*> exprP
                 <?> "Abstraction"        
@@ -424,9 +435,9 @@ exprP =
 -------------------------------------------------------------------------------
 
         matExprP =
-            reserved "match"
-                >>  MatExpr
-                <$> exprP
+            pure MatExpr
+                <*  reserved "match"
+                <*> exprP
                 <*  reserved "with"
                 <*> many1 (try caseP)
                 <?> "Match Expression"
@@ -438,22 +449,20 @@ exprP =
 -------------------------------------------------------------------------------
 
         letExprP =
-            reserved "let" 
-                >>  (LetExpr .) . SymBind
-                <$> symP
+            pure ((LetExpr .) . SymBind)
+                <*  reserved "let" 
+                <*> symP
                 <*  reservedOp "="
                 <*> exprP
                 <*  semi
                 <*> exprP
                 <?> "Let Expression"
 
--------------------------------------------------------------------------------
-
         typExprP =
-            reserved "data" 
-                >>  (LetExpr .) . TypBind
-                <$> typP
-                <*  reservedOp "="
+            pure ((LetExpr .) . TypBind)
+                <*  reserved "data"
+                <*> typP
+                <*  reserved "="
                 <*> typSchP
                 <*  semi
                 <*> exprP
@@ -461,9 +470,11 @@ exprP =
 
 -------------------------------------------------------------------------------
 
+-- TODO explain `buildExpressionParser`, allude to `ifx`
+
         appExprP =
 
-            buildExpressionParser (ifx opConst ops) termP <?> "Application"
+            buildExpressionParser (ifx opConst AssocLeft ops) termP <?> "Application"
 
             where
                 valExprP =
@@ -477,32 +488,38 @@ exprP =
 
 -- TODO explain this crap
 
-ifx op =
+ifx op assoc =
     map $ map
-        $ flip Infix AssocLeft 
+        $ flip Infix assoc 
         . uncurry (*>) 
         . (reservedOp &&& return . op) 
+
+-------------------------------------------------------------------------------
 
 typP :: Parser Typ
 typP = typAppP <?> "Type Symbol"
 
     where
-        typAppP = buildExpressionParser (ifx fnConst [[ "->" ]]) termP
-        fnConst = (TypApp .) . TypApp . TypSym
-        termP   = (typVarP <|> typSymP) `chainl1` return TypApp
+        typAppP = buildExpressionParser (ifx fnConst AssocRight [[ "->" ]]) termP
+        fnConst = (TypApp .) . TypApp . TypSym . TypeSym
+        termP   = (typVarP <|> TypSym <$> typSymP) `chainl1` return TypApp
         typVarP = TypVar <$> identifier <?> "Type Variable"
+
+-------------------------------------------------------------------------------
 
 typSchP :: Parser TypSch
 typSchP =
-    reserved "forall"
-        >>  TypSch . (:[]) . Sym
-        <$> identifier
+    pure (TypSch . (:[]) . Sym)
+        <*  reserved "forall"
+        <*> identifier
         <*  reservedOp "=>"
         <*> typP
         <?> "Type Scheme"
 
-typSymP :: Parser Typ
-typSymP = (TypSym .) . (:) <$> upper <*> identifier
+-------------------------------------------------------------------------------
+
+typSymP :: Parser TypeSym
+typSymP = (TypeSym .) . (:) <$> upper <*> identifier
 
 -------------------------------------------------------------------------------
 
@@ -517,7 +534,7 @@ typSymP = (TypSym .) . (:) <$> upper <*> identifier
 --   A. Overview of the algorithm, a TypeCheck monad
 --         (TODO) may have to drop polymorphic types to save time.
 
-typeCheck  :: Expr   -> Either Err Expr
+typeCheck  :: Expr -> Either Err Expr
 typeCheck expr =
     fmap (const expr . fst)
          . flip runStateT (nullSubst, 0)
@@ -534,7 +551,7 @@ prelude = [
 data Kind  = Star | Kfun Kind Kind deriving (Eq, Show)
 
 data Type  = TVar Tyvar | TCon Tycon | TAp  Type Type | TGen Int
-               deriving (Eq, Show)
+               deriving (Eq)
  
 data Tyvar = Tyvar String Kind
              deriving (Eq, Show)
@@ -542,11 +559,21 @@ data Tyvar = Tyvar String Kind
 data Tycon = Tycon String Kind
              deriving (Eq, Show)
 
+instance Show Type where
+
+    show (TVar (Tyvar t _)) = t
+    show (TCon (Tycon t _)) = t
+    show (TAp (TCon (Tycon "->" _)) x) = show x ++ " ->"
+    show (TAp x y) = "(" ++ show x ++ " " ++ show y ++ ")"
+    show (TGen t) = "__gen__" ++ show t
+
+
+
 tString  = TCon (Tycon "String" Star)
 tBool    = TCon (Tycon "Boolean" Star)
 tDouble  = TCon (Tycon "Double" Star)
 tList    = TCon (Tycon "[]" (Kfun Star Star))
-tArrow   = TCon (Tycon "(->)" (Kfun Star (Kfun Star Star)))
+tArrow   = TCon (Tycon "->" (Kfun Star (Kfun Star Star)))
 
 infixr      4 `fn`
 fn         :: Type -> Type -> Type
@@ -563,6 +590,8 @@ instance HasKind Type where
    kind (TVar u)  = kind u
    kind (TAp t _) = case (kind t) of
                       (Kfun _ k) -> k
+                      
+
 
 type Subst  = [(Tyvar, Type)]
 
@@ -592,8 +621,8 @@ infixr 4 @@
 (@@)       :: Subst -> Subst -> Subst
 s1 @@ s2    = [ (u, apply s1 t) | (u,t) <- s2 ] ++ s1
 
-mgu     :: Monad m => Type -> Type -> m Subst
-varBind :: Monad m => Tyvar -> Type -> m Subst
+mgu     :: Type -> Type -> TypeCheck Subst
+varBind :: Tyvar -> Type -> TypeCheck Subst
 
 mgu (TAp l r) (TAp l' r') = do s1 <- mgu l l'
                                s2 <- mgu (apply s1 r) (apply s1 r')
@@ -602,15 +631,17 @@ mgu (TVar u) t        = varBind u t
 mgu t (TVar u)        = varBind u t
 mgu (TCon tc1) (TCon tc2)
            | tc1==tc2 = return nullSubst
-mgu t1 t2             = fail ("types do not unify;\n" ++ show t1 ++ " and " ++ show t2)
+mgu t1 t2 = typErr ("types do not unify;\n  "  ++ show t1 ++ " (" ++ show (kind t1) ++ ") and " ++ show t2 ++ " (" ++ show (kind t2) ++ ")")
+
+typErr = lift . Left . Err
 
 varBind u t | t == TVar u      = return nullSubst
-            | u `elem` tv t    = fail "occurs check fails"
-            | kind u /= kind t = fail "kinds do not match"
+            | u `elem` tv t    = typErr ("occurs check typErrs\n  " ++ show u ++ " (" ++ show (kind u) ++ ") and " ++ show t ++ " (" ++ show (kind t) ++ ")")
+            | kind u /= kind t = typErr ("kinds do not match\n  " ++ show u ++ " (" ++ show (kind u) ++ ") and " ++ show t ++ " (" ++ show (kind t) ++ ")")
             | otherwise        = return [(u, t)]
 
 data Scheme = Forall [Kind] Type
-              deriving Eq
+              deriving (Eq, Show)
 
 instance Types Scheme where
     apply s (Forall ks qt) = Forall ks (apply s qt)
@@ -628,8 +659,8 @@ instance Types Assump where
     apply s (i :>: sc) = i :>: (apply s sc)
     tv (i :>: sc)      = tv sc
 
-find                 :: Monad m => String -> [Assump] -> m Scheme
-find i []             = fail ("unbound identifier: " ++ i)
+find                 :: String -> [Assump] -> TypeCheck Scheme
+find i []             = typErr ("unbound identifier: " ++ i)
 find i ((i':>:sc):as) = if i==i' then return sc else find i as
 
 type TypeCheck a = StateT (Subst, Int) (Either Err) a
@@ -672,14 +703,62 @@ litCheck :: Lit -> Type
 litCheck (StrLit _)  = tString
 litCheck (NumLit _)  = tDouble
 
-pattCheck :: Patt -> TypeCheck ([Assump], Type)
+pattCheck :: [Assump] -> Patt -> TypeCheck ([Assump], Type)
 
-pattCheck (ValPatt (SymVal (Sym s))) = do
+pattCheck as (ValPatt (SymVal (Sym s))) = do
     t <- newTVar Star
     return ([ s :>: Forall [] t ], t)
 
-pattCheck (ValPatt (LitVal l)) = do
+pattCheck as (ValPatt (LitVal l)) = do
     return ([], litCheck l)
+
+pattCheck as (ValPatt (ConVal (TypSym (TypeSym l)))) = do
+    sc <- find l as
+    t  <- freshInst sc
+    return ([], t)
+
+pattCheck as (ConPatt (TypeSym con) ps) = do
+    sc <- find con as
+    x  <- sequence (map (pattCheck as) ps)
+    t' <- newTVar Star
+    t  <- freshInst sc
+    unify t (foldr fn t' (map snd x))
+    return (L.concat (map fst x), t')
+
+pattCheck as x = typErr $ show x
+
+
+db :: Show a => a -> a
+db x = unsafePerformIO $ do putStrLn$ "-- " ++ (show x)
+                            return x
+
+
+
+toAssump :: Typ -> TypSch -> TypeCheck [Assump]
+toAssump n sc = do
+    name  <- getName n
+    qt    <- getQt (db sc)
+    return [ name :>: qt ]
+
+    where
+        getName t = case t of 
+            TypSym (TypeSym n)   -> lift (Right n)
+            _          -> typErr ("Illegal data declaration\n  " ++ show t)
+
+-- fix kind inference
+
+        getQt :: TypSch -> TypeCheck Scheme
+        getQt (TypSch tvars typ) =
+            return $ quantify (map toVar tvars) (toTyp typ Star)
+
+        toVar (Sym n) = Tyvar n Star
+
+        toTyp (TypSym (TypeSym n)) k = TCon $ Tycon n k
+        toTyp (TypVar n) k = TVar $ Tyvar n k
+        toTyp (TypApp f x) k =
+            TAp (toTyp f (Kfun Star k)) (toTyp x Star)
+
+             
 
 exprCheck :: [Assump] -> Expr -> TypeCheck Type
 
@@ -688,6 +767,11 @@ exprCheck as (LetExpr (SymBind (Sym sym) val) expr) = do
     valT <- exprCheck ((sym :>: Forall [] symT) : as) val
     unify valT symT
     exprCheck ((sym :>: Forall [] symT) : as) expr
+
+exprCheck as (LetExpr (TypBind typ typSch) expr) = do
+
+    typAs <- toAssump typ typSch
+    exprCheck (typAs ++ as) expr
 
 exprCheck as (AppExpr f x) = do
     fT   <- exprCheck as f
@@ -704,23 +788,28 @@ exprCheck as (AbsExpr (Sym sym) expr) = do
 exprCheck as (VarExpr (SymVal (Sym sym))) =
     find sym as >>= freshInst
 
+exprCheck as (VarExpr (ConVal (TypSym (TypeSym sym)))) =
+    find sym as >>= freshInst
+
+
 exprCheck as (VarExpr (LitVal l)) =
     return (litCheck l)
 
 exprCheck as (MatExpr expr ((patt, res):[])) = do
     exprT <- exprCheck as expr
-    (pattAs, pattT) <- pattCheck patt
+    (pattAs, pattT) <- pattCheck as patt
     unify exprT pattT
     exprCheck (pattAs ++ as) res
 
 exprCheck as (MatExpr expr ((patt, res):es)) = do
     exprT <- exprCheck as expr
-    (pattAs, pattT) <- pattCheck patt
+    (pattAs, pattT) <- pattCheck as patt
     unify exprT pattT
     resT  <- exprCheck (pattAs ++ as) res
     esT   <- exprCheck as (MatExpr expr es)
     unify resT esT
     return resT
+
     
 
 
@@ -844,7 +933,7 @@ instance ToJExpr Match where
     |]
 
 
--- UTypeCheckLS
+-- UTILS
 
 
 toText :: JExpr  -> Either Err String
