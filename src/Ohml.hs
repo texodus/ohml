@@ -1,27 +1,30 @@
+-------------------------------------------------------------------------------
 
--- TITLE
 -- One Hour ML, or How I Learned To Stop Worrying And Write An 
 -- ML To Javascript Compiler In About One Hour.
 
--- ABSTRACT
--- In the spirit of [Write Yourself a Scheme in 48hrs](http://en.wikibooks.org/wiki/Write_Yourself_a_Scheme_in_48_Hours),
--- this talk will detail the implementation of a simple compiler for an ML like language, targeting 
--- Javascript.  Topics covered will include the [Parsec](http://www.haskell.org/haskellwiki/Parsec) parser combinator
--- library, the basics of a Hindley/Milner style type inference engine, and the [JMacro](http://www.haskell.org/haskellwiki/Jmacro)
--- quasiquotation language for Javascript generation.  Stopwatches welcome!
+-------------------------------------------------------------------------------
 
--- SLIDES
+-- * [Write Yourself a Scheme in 48hrs]
+--   (http://en.wikibooks.org/wiki/Write_Yourself_a_Scheme_in_48_Hours),
 
--- I. Introduction (10 min) ---------------------------------------------------
+-- * [Parsec]
+--   (http://www.haskell.org/haskellwiki/Parsec)
 
 
--- I.A. -----------------------------------------------------------------------
+-- * [JMacro]
+--   (http://www.haskell.org/haskellwiki/Jmacro)
+
+-- * [Typing Haskell in Haskell]
+--   (]http://web.cecs.pdx.edu/~mpj/thih/)
+
+-- I. -------------------------------------------------------------------------
 
 -- Quick intro, explicitly skip ML history, high level overview 
 
 -------------------------------------------------------------------------------
 
--- There are some extesions necessary - there necessity will be described 
+-- There are some extensions necessary - there necessity will be described 
 -- inline.
 
 {-# LANGUAGE GADTs #-}
@@ -100,13 +103,28 @@ samplePrograms = [
     \       0 -> 0;                            \
     \       1 -> 1;                            \
     \       n -> fib (n - 1) + fib (n - 2);;   \
-    \   fib 13                                 ",
+    \   fib 1                                  ",
+
+-------------------------------------------------------------------------------
+
+-- User defined algebraic data type constructors.
+-- (TODO Address GADTs)
+
+    "   data Cons = forall a => a -> List a -> List a;   \
+    \   data Nil  = forall a => List a;                  \
+    \                                                    \
+    \   let length = fun n ->                            \
+    \       match n with                                 \
+    \       Nil -> 0;                                    \
+    \       (Cons _ xs) -> 1 + length xs;;               \
+    \                                                    \
+    \   length (Cons 1 (Cons 2 Nil)) == 2                ",
 
 -------------------------------------------------------------------------------
 
 -- And of course, our language will not do dumb things while parsing    
 
-    "   let truely = 4; (let func = fun x -> x + 2; func 4)   ",
+    "   let letly = 4; (let func = fun x -> x + ((2)); func letly)   ",
 
 -------------------------------------------------------------------------------
 
@@ -181,7 +199,7 @@ newtype Err = Err String deriving Show
 
 data Expr where
 
-    LetExpr :: Sym  -> Expr -> Expr -> Expr
+    LetExpr :: Bind -> Expr -> Expr
     AppExpr :: Expr -> Expr -> Expr
     AbsExpr :: Sym  -> Expr -> Expr
     VarExpr :: Val  -> Expr                     -- TODO spell me correktly!
@@ -191,6 +209,35 @@ data Expr where
 
 -------------------------------------------------------------------------------
 
+-- TODO Describe symbol and type bindings
+
+data Bind where
+
+    SymBind :: Sym -> Expr   -> Bind
+    TypBind :: Typ -> TypSch -> Bind
+
+    deriving (Show)
+
+-------------------------------------------------------------------------------
+
+-- TODO describe the type signature AST
+
+data Typ where
+
+    TypSym :: String -> Typ
+    TypVar :: String -> Typ
+    TypApp :: Typ -> Typ -> Typ
+
+    deriving (Show)  
+
+data TypSch where
+
+    TypSch :: [Sym] -> Typ -> TypSch
+
+    deriving (Show)
+    
+-------------------------------------------------------------------------------
+
 -- Patterns are either `Val` or `Con` (which is really a decon, amirite?).
 -- Note we do not distinguish between literal and symbol matching, 
 -- because this is captured in the definition of `Val`
@@ -198,7 +245,7 @@ data Expr where
 data Patt where
 
     ValPatt :: Val -> Patt
-    ConPatt :: Sym -> [Patt] -> Patt
+    ConPatt :: Typ -> [Patt] -> Patt
 
     deriving (Show)
 
@@ -210,6 +257,7 @@ data Val where
 
     SymVal  :: Sym -> Val
     LitVal  :: Lit -> Val
+    ConVal  :: Typ -> Val
 
     deriving (Show)
 
@@ -225,7 +273,6 @@ data Lit where
 
     StrLit  :: String -> Lit
     NumLit  :: Double -> Lit
-    BoolLit :: Bool   -> Lit
 
     deriving (Show)
 
@@ -274,7 +321,7 @@ parseOhml = left (Err . show) . parse grammar "Parsing OHML"
 -- There is some static info we need to define about OHML.  The language
 -- keywords ...
 
-keywords = [ "let", "true", "false", "fun", "match", "with" ]
+keywords = [ "let", "fun", "match", "with", "data" ]
 
 -- ... and operators, arranged in precedence order.
 
@@ -297,36 +344,43 @@ T.TokenParser { .. } = T.makeTokenParser ohmlDef
 
 -------------------------------------------------------------------------------
 
---   C. A Parser for OHML
-
---     1. The Literal parser is a simple parser which generates Lit values.
---        Here, `stringLiteral` and `float` come from `T.TokenParser`.
-
-litP :: Parser Lit
-litP =
-
-    stringL <|> numL <|> boolL
-
-    where
-        stringL = StrLit  <$> stringLiteral
-        boolL   = BoolLit <$> (true <|> false)
-        numL    = NumLit . toDouble <$> naturalOrFloat
-
-        true  = reserved "true"  *> return True
-        false = reserved "false" *> return False
-
-        toDouble (Left i)  = fromInteger i
-        toDouble (Right f) = f
-
---     2. The `Sym` and `Val` parsers
+-- The simplest parsers are for `Sym` and `Val`
+-- (TODO explain `<$>`)
 
 symP :: Parser Sym
 symP = Sym <$> identifier
 
-valP :: Parser Val
-valP = (SymVal <$> symP) <|> (LitVal <$> litP)
+-- (TODO explain `<|>`)
 
---     3. Pattern parser introduces `parens`
+valP :: Parser Val
+valP = (SymVal <$> symP) <|> (LitVal <$> litP) <|> (ConVal <$> typSymP)
+
+-------------------------------------------------------------------------------
+
+-- So the next simplest parser we can define is the parser for literals
+-- The Literal parser is a simple parser which generates Lit values.
+-- TODO explain `<|>` and `try`
+
+litP :: Parser Lit
+litP = stringL <|> numL
+
+-------------------------------------------------------------------------------
+
+-- Here, `stringLiteral` and `float` come from `T.TokenParser`.
+-- TODO explain `<$>`
+
+    where
+        stringL = StrLit  <$> stringLiteral
+        numL    = NumLit . toDouble <$> naturalOrFloat
+
+-- with the help of some helpers.
+
+        toDouble (Left i)  = fromInteger i
+        toDouble (Right f) = f
+
+-------------------------------------------------------------------------------
+
+-- Pattern parser introduces `parens` and `many`
 
 pattP :: Parser Patt
 pattP =
@@ -335,28 +389,39 @@ pattP =
 
     where
         valPattP = ValPatt <$> valP
-        conPattP = flip ConPatt [] <$> symP
-        conPatsP = ConPatt <$> symP <*> many pattP <|> pattP
+        conPattP = flip ConPatt [] <$> typP
+        conPatsP = ConPatt <$> typP <*> many pattP <|> pattP
 
---     4. The `Expr` parser makes use of a number of `T.TokenParser` lexers.
+-------------------------------------------------------------------------------
+
+-- The `Expr` parser makes use of a number of `T.TokenParser` lexers.
 
 exprP :: Parser Expr
 exprP =
 
     letExprP
+        <|> typExprP
         <|> absExprP 
         <|> matExprP 
         <|> appExprP 
-        <|> valExprP 
-        <|> parens exprP
+
+-- and we obviously need to define all of these 
 
     where
+
+-------------------------------------------------------------------------------
+
+-- (TODO explain `reserved`)
+
         absExprP =
             reserved "fun"
                 >>  AbsExpr
                 <$> symP
                 <*  reservedOp "->"
-                <*> exprP          
+                <*> exprP
+                <?> "Abstraction"        
+
+-------------------------------------------------------------------------------
 
         matExprP =
             reserved "match"
@@ -364,42 +429,90 @@ exprP =
                 <$> exprP
                 <*  reserved "with"
                 <*> many1 (try caseP)
+                <?> "Match Expression"
+
             where
                 caseP =
                     (,) <$> pattP <*  reservedOp "->" <*> exprP <* semi
 
+-------------------------------------------------------------------------------
+
         letExprP =
             reserved "let" 
-                >>  LetExpr
+                >>  (LetExpr .) . SymBind
                 <$> symP
                 <*  reservedOp "="
                 <*> exprP
                 <*  semi
                 <*> exprP
+                <?> "Let Expression"
 
-        valExprP = VarExpr <$> valP
+-------------------------------------------------------------------------------
+
+        typExprP =
+            reserved "data" 
+                >>  (LetExpr .) . TypBind
+                <$> typP
+                <*  reservedOp "="
+                <*> typSchP
+                <*  semi
+                <*> exprP
+                <?> "Type Expression"
+
+-------------------------------------------------------------------------------
 
         appExprP =
-            buildExpressionParser (map (map ix) ops) termP
+
+            buildExpressionParser (ifx opConst ops) termP <?> "Application"
+
             where
+                valExprP =
+                    VarExpr <$> valP <?> "Value"
                 termP =
                     (valExprP <|> parens exprP) `chainl1` return AppExpr
-                op = 
-                    (AppExpr .) . AppExpr . VarExpr . SymVal . Sym
-                ix =
-                    flip Infix AssocLeft 
-                        . uncurry (*>) 
-                        . (reservedOp &&& return . op) 
 
+                opConst = (AppExpr .) . AppExpr . VarExpr . SymVal . Sym 
 
+-------------------------------------------------------------------------------
 
+-- TODO explain this crap
 
+ifx op =
+    map $ map
+        $ flip Infix AssocLeft 
+        . uncurry (*>) 
+        . (reservedOp &&& return . op) 
 
+typP :: Parser Typ
+typP = typAppP <?> "Type Symbol"
 
+    where
+        typAppP = buildExpressionParser (ifx fnConst [[ "->" ]]) termP
+        fnConst = (TypApp .) . TypApp . TypSym
+        termP   = (typVarP <|> typSymP) `chainl1` return TypApp
+        typVarP = TypVar <$> identifier <?> "Type Variable"
 
+typSchP :: Parser TypSch
+typSchP =
+    reserved "forall"
+        >>  TypSch . (:[]) . Sym
+        <$> identifier
+        <*  reservedOp "=>"
+        <*> typP
+        <?> "Type Scheme"
 
+typSymP :: Parser Typ
+typSymP = (TypSym .) . (:) <$> upper <*> identifier
 
--- III. Type Inference (20 min) -----------------------------------------------
+-------------------------------------------------------------------------------
+
+-- ... and that's it!
+
+-- III. -----------------------------------------------------------------------
+
+-- Type Inference
+
+-------------------------------------------------------------------------------
 
 --   A. Overview of the algorithm, a TypeCheck monad
 --         (TODO) may have to drop polymorphic types to save time.
@@ -414,8 +527,8 @@ typeCheck expr =
 prelude :: [Assump]
 prelude = [ 
     "==" :>: Forall [Star] (TGen 0 `fn` TGen 0 `fn` TGen 0),
-    "+"  :>: Forall []  (tDouble `fn` tDouble `fn` tDouble),
-    "-"  :>: Forall []  (tDouble `fn` tDouble `fn` tDouble)
+    "+"  :>: Forall []     (tDouble `fn` tDouble `fn` tDouble),
+    "-"  :>: Forall []     (tDouble `fn` tDouble `fn` tDouble)
     ]   
 
 data Kind  = Star | Kfun Kind Kind deriving (Eq, Show)
@@ -503,11 +616,11 @@ instance Types Scheme where
     apply s (Forall ks qt) = Forall ks (apply s qt)
     tv (Forall ks qt)      = tv qt
 
---quantify      :: [Tyvar] -> Type -> Scheme
---quantify vs qt = Forall ks (apply s qt)
--- where vs' = [ v | v <- tv qt, v `elem` vs ]
---       ks  = map kind vs'
---       s   = zip vs' (map TGen [0..])
+quantify      :: [Tyvar] -> Type -> Scheme
+quantify vs qt = Forall ks (apply s qt)
+ where vs' = [ v | v <- tv qt, v `elem` vs ]
+       ks  = map kind vs'
+       s   = zip vs' (map TGen [0..])
 
 data Assump = String :>: Scheme
 
@@ -519,28 +632,28 @@ find                 :: Monad m => String -> [Assump] -> m Scheme
 find i []             = fail ("unbound identifier: " ++ i)
 find i ((i':>:sc):as) = if i==i' then return sc else find i as
 
-type TI a = StateT (Subst, Int) (Either Err) a
+type TypeCheck a = StateT (Subst, Int) (Either Err) a
 
-getSubst   :: TI Subst
+getSubst   :: TypeCheck Subst
 getSubst    = fst <$> get
 
-unify      :: Type -> Type -> TI ()
+unify      :: Type -> Type -> TypeCheck ()
 unify t1 t2 = do s <- getSubst
                  u <- mgu (apply s t1) (apply s t2)
                  extSubst u
 
-extSubst   :: Subst -> TI ()
+extSubst   :: Subst -> TypeCheck ()
 extSubst s' = do
     (s, i) <- get
     put (s' @@ s, i)
 
-newTVar    :: Kind -> TI Type
+newTVar    :: Kind -> TypeCheck Type
 newTVar k   = do
     (s, i) <- get
     put (s, i + 1)
     return (TVar (Tyvar ("tvar_" ++ show i) k))
 
-freshInst               :: Scheme -> TI Type
+freshInst               :: Scheme -> TypeCheck Type
 freshInst (Forall ks qt) = do ts <- mapM newTVar ks
                               return (inst ts qt)
 
@@ -552,15 +665,14 @@ instance Instantiate Type where
   inst ts (TGen n)  = ts !! n
   inst ts t         = t
 
-instance Instantiate a => Instantiate [a] where
-  inst ts = map (inst ts)
+--instance Instantiate a => Instantiate [a] where
+--  inst ts = map (inst ts)
 
 litCheck :: Lit -> Type
 litCheck (StrLit _)  = tString
 litCheck (NumLit _)  = tDouble
-litCheck (BoolLit _) = tBool
 
-pattCheck :: Patt -> TI ([Assump], Type)
+pattCheck :: Patt -> TypeCheck ([Assump], Type)
 
 pattCheck (ValPatt (SymVal (Sym s))) = do
     t <- newTVar Star
@@ -569,9 +681,9 @@ pattCheck (ValPatt (SymVal (Sym s))) = do
 pattCheck (ValPatt (LitVal l)) = do
     return ([], litCheck l)
 
-exprCheck :: [Assump] -> Expr -> TI Type
+exprCheck :: [Assump] -> Expr -> TypeCheck Type
 
-exprCheck as (LetExpr (Sym sym) val expr) = do
+exprCheck as (LetExpr (SymBind (Sym sym) val) expr) = do
     symT <- newTVar Star
     valT <- exprCheck ((sym :>: Forall [] symT) : as) val
     unify valT symT
@@ -646,7 +758,6 @@ instance ToJExpr Sym where
 instance ToJExpr Lit where
 
     toJExpr (StrLit s)  = toJExpr s
-    toJExpr (BoolLit b) = toJExpr b
     toJExpr (NumLit n)  = toJExpr n
 
 
@@ -681,7 +792,7 @@ instance ToJExpr Expr where
 
         toJExpr v
 
-    toJExpr (LetExpr (Sym sym) ex expr) = [jmacroE| 
+    toJExpr (LetExpr (SymBind (Sym sym) ex) expr) = [jmacroE| 
 
         `(intro sym (const ex) expr)`()
 
@@ -733,7 +844,7 @@ instance ToJExpr Match where
     |]
 
 
--- UTILS
+-- UTypeCheckLS
 
 
 toText :: JExpr  -> Either Err String
@@ -741,6 +852,8 @@ toText = Right . show . renderJs
 
 
 unwrap (Right x) = putStrLn x >> putStrLn "----------------------"
+unwrap (Left x)  = putStrLn (show x) >> putStrLn "----------------------"
+
 
 -- V. Wrap up, run the samples from the intro.
 
@@ -751,5 +864,5 @@ unwrap (Right x) = putStrLn x >> putStrLn "----------------------"
 
 -- The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
--- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+-- THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTypeCheckES OF MERCHANTABILITY, FITNESS FOR A PARTypeCheckCULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTypeCheckON OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTypeCheckON WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
