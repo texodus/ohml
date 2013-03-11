@@ -11,7 +11,6 @@
 -- * [Parsec]
 --   (http://www.haskell.org/haskellwiki/Parsec)
 
-
 -- * [JMacro]
 --   (http://www.haskell.org/haskellwiki/Jmacro)
 
@@ -145,7 +144,7 @@ samplePrograms = [
 
 -------------------------------------------------------------------------------
 
--- Other examples should be inserted here ...
+-- TODO Other examples should be inserted here ...
 
     ]
 
@@ -172,7 +171,7 @@ main  = do
 
 -------------------------------------------------------------------------------
 
--- The structure of compilationcan be expressed as a simple
+-- The structure of compilation can be expressed as a simple
 -- function composition.  
 
 compile :: String -> Either Err String
@@ -194,8 +193,6 @@ newtype Err = Err String deriving Show
 
 -- The 10,000 ft view of an an OHML program is a simple expression. 
 -- Here, `AbsExpr` is an Abstraction, and `AppExpr` is an Application.
--- (Note: We use GADT syntax solely for clarity - even though
--- this is not necessary)
 
 data Expr where
 
@@ -206,6 +203,9 @@ data Expr where
     MatExpr :: Expr -> [(Patt, Expr)] -> Expr
 
     deriving (Show)
+
+-- (Note: We use GADT syntax solely for clarity - even though
+-- this is not necessary)
 
 -------------------------------------------------------------------------------
 
@@ -480,8 +480,8 @@ exprP =
                     VarExpr <$> valP <?> "Value"
                 termP =
                     (valExprP <|> parens exprP) `chainl1` return AppExpr
-
-                opConst = (AppExpr .) . AppExpr . VarExpr . SymVal . Sym 
+                opConst =
+                    (AppExpr .) . AppExpr . VarExpr . SymVal . Sym 
 
 -------------------------------------------------------------------------------
 
@@ -529,14 +529,13 @@ typSymP = (TypeSym .) . (:) <$> upper <*> identifier
 
 -- ... and that's it!
 
--- III. -----------------------------------------------------------------------
+-------------------------------------------------------------------------------
 
--- Type Inference
+-- III. Type Inference.
 
 -------------------------------------------------------------------------------
 
--- Overview of the algorithm, a TypeCheck monad
--- (TODO) may have to drop polymorphic types to save time.
+-- Overview of the algorithm.
 
 typeCheck :: Expr -> Either Err Expr
 typeCheck expr =
@@ -545,7 +544,13 @@ typeCheck expr =
          . exprCheck prelude
          $ expr
 
+-- A Type Checking Monad
+
+type TypeCheck a = StateT (Subst, Int) (Either Err) a
+
 -------------------------------------------------------------------------------
+
+-- There are lots of errors that can happen when inferring types.
 
 typErr = lift . Left . Err
 
@@ -559,30 +564,9 @@ uniErr msg t u = typErr $
 
 -------------------------------------------------------------------------------
 
+-- There are some new vocab words.
+
 data Kind  = Star | Kfun Kind Kind deriving (Eq, Show)
-
-data Type  = TVar Tyvar | TCon Tycon | TAp  Type Type | TGen Int
-               deriving (Eq, Show)
- 
-data Tyvar = Tyvar String Kind
-             deriving (Eq, Show)
-
-data Tycon = Tycon String Kind
-             deriving (Eq, Show)
-
--------------------------------------------------------------------------------
-
-tString  = TCon (Tycon "String" Star)
-tBool    = TCon (Tycon "Boolean" Star)
-tDouble  = TCon (Tycon "Double" Star)
-tList    = TCon (Tycon "[]" (Kfun Star Star))
-tArrow   = TCon (Tycon "->" (Kfun Star (Kfun Star Star)))
-
-infixr 4 `fn`
-fn :: Type -> Type -> Type
-a `fn` b = TAp (TAp tArrow a) b
-
--------------------------------------------------------------------------------
 
 class HasKind t where
 
@@ -604,17 +588,61 @@ instance HasKind Type where
 
 -------------------------------------------------------------------------------
 
+-- And we need a parallel representation of the type system to compensate
+-- (TODO get rid of this!)
+
+data Type  = TVar Tyvar | TCon Tycon | TAp  Type Type | TGen Int
+               deriving (Eq, Show)
+ 
+data Tyvar = Tyvar String Kind
+             deriving (Eq, Show)
+
+data Tycon = Tycon String Kind
+             deriving (Eq, Show)
+
+-------------------------------------------------------------------------------
+
+-- Some familiar types defined in out new vocabulary.  Tidy!
+
+tString  = TCon (Tycon "String" Star)
+tBool    = TCon (Tycon "Boolean" Star)
+tDouble  = TCon (Tycon "Double" Star)
+tList    = TCon (Tycon "[]" (Kfun Star Star))
+tArrow   = TCon (Tycon "->" (Kfun Star (Kfun Star Star)))
+
+-- Annoying As Fuck (tm).
+
+fn :: Type -> Type -> Type
+fn a b = TAp (TAp tArrow a) b
+
+-------------------------------------------------------------------------------
+
+-- We need the ability to generate unique type variables 
+
+newTVar :: Kind -> TypeCheck Type
+newTVar k = do
+    (s, i) <- get
+    put (s, i + 1)
+    return (TVar (Tyvar ("tvar_" ++ show i) k))
+
+-------------------------------------------------------------------------------
+
 -- Type substitutions
 
 type Subst = [(Tyvar, Type)]
 
 -------------------------------------------------------------------------------
 
+-- Substitutions can be applied to types
+
 apply :: Subst -> Type -> Type
 apply s (TVar (flip lookup s -> Just u)) = u
 apply _ (TVar u) = TVar u
 apply s (TAp l r) = TAp (apply s l) (apply s r)
 apply _ t = t
+
+-- and it will be useful for calculating substitutions to have a way
+-- to get the free `TyVar`s in a `Type`
 
 tv :: Type -> [Tyvar]
 tv (TVar u) = [u]
@@ -623,42 +651,66 @@ tv t = []
 
 -------------------------------------------------------------------------------
 
-infixr 4 @@
-(@@) :: Subst -> Subst -> Subst
-s1 @@ s2 = [ (u, apply s1 t) | (u,t) <- s2 ] ++ s1
+-- It would be nice to have a simple tool for incrementally extending our
+-- substitution environment.
+
+ext :: Subst -> Subst -> Subst
+ext sub1 sub2 = [ (u, apply sub1 t) | (u,t) <- sub2 ] ++ sub1
 
 -------------------------------------------------------------------------------
 
--- Unification
+-- M.ost G.eneral U.nifier modifies the substitution environment such that
+-- both input types are the same.  This is the Principal Type;  further 
+-- inference can only restrict this type further.
 
 mgu :: Type -> Type -> TypeCheck Subst
 
-mgu (TAp l r) (TAp l' r') = do 
-    s1 <- mgu l l'
-    s2 <- mgu (apply s1 r) (apply s1 r')
-    return (s2 @@ s1)                           
+mgu (TAp f x) (TAp g y) = do 
+    sub1 <- f `mgu` g
+    sub2 <- apply sub1 x `mgu` apply sub1 y
+    return (sub2 `ext` sub1)                           
                                
-mgu (TVar u) t = varBind u t
+mgu (TVar u) t =
+    u `varBind` t
 
-mgu t (TVar u) = varBind u t
+mgu t (TVar u) =
+    u `varBind` t
 
-mgu (TCon t) (TCon u)
-    | t == u = return []
+mgu (TCon t) (TCon u) | t == u =
+    return []
 
-mgu t u = uniErr "types do not unify" t u
+mgu t u =
+    uniErr "types do not unify" t u
 
 -------------------------------------------------------------------------------
 
--- Kind checking pt 2
+-- Once we've committed to creating a new substitution, we need to make
+-- sure it's valid by (1) checking that the kinds match, and (2) checking
+-- that we are not constructing a replacement for a type into itself.
 
 varBind :: Tyvar -> Type -> TypeCheck Subst
+
 varBind u t 
     | t == TVar u      = return []
-    | u `elem` tv t    = uniErr "occurs check failed" t u
-    | kind u /= kind t = uniErr "kinds do not match" t u
+    | u `elem` tv t    = uniErr "occurs check failed" t u  -- (2)
+    | kind u /= kind t = uniErr "kinds do not match"  t u  -- (1)
     | otherwise        = return [(u, t)]            
+
+-------------------------------------------------------------------------------
+
+-- With these tools in hand, we can implement the Unificiation step
+
+unify :: Type -> Type -> TypeCheck ()
+unify t1 t2 = do 
+    s <- fst <$> get
+    u <- apply s t1 `mgu` apply s t2
+    get >>= return . first (ext u) >>= put
+
             
 -------------------------------------------------------------------------------
+
+-- Generalization
+-- --------------
 
 -- Type Schemes            
 
@@ -668,12 +720,27 @@ data Scheme where
 
 -------------------------------------------------------------------------------
 
+-- Generalizing types
+
 quantify :: [Tyvar] -> Type -> Scheme
-quantify vs qt = Forall ks (apply s qt)
+quantify vars typ = Forall kinds (apply subs typ)
     where
-        vs' = [ v | v <- tv qt, v `elem` vs ]
-        ks  = map kind vs'
-        s   = zip vs' (map TGen [0..])
+        qVars = [ var | var <- tv typ, var `elem` vars ]
+        kinds = map kind qVars
+        subs  = zip qVars (map TGen [ 0 .. ])
+
+-- ... and instantiating them again.
+
+freshInst :: Scheme -> TypeCheck Type
+freshInst (Forall ks qt) = do
+
+    ts <- mapM newTVar ks
+    return (inst ts qt)
+
+    where
+        inst ts (TAp l r) = TAp (inst ts l) (inst ts r)
+        inst ts (TGen n)  = ts !! n
+        inst ts t         = t
 
 -------------------------------------------------------------------------------
 
@@ -693,41 +760,6 @@ find i [] = typErr ("unbound identifier: " ++ i)
 find i ((i' :>: sc) : as) 
     | i == i'   = return sc
     | otherwise = find i as
-
--------------------------------------------------------------------------------
-
--- A Type Checking Monad
-
-type TypeCheck a = StateT (Subst, Int) (Either Err) a
-
--------------------------------------------------------------------------------
-
-newTVar :: Kind -> TypeCheck Type
-newTVar k = do
-    (s, i) <- get
-    put (s, i + 1)
-    return (TVar (Tyvar ("tvar_" ++ show i) k))
-
--------------------------------------------------------------------------------
-
-unify :: Type -> Type -> TypeCheck ()
-unify t1 t2 = do 
-    s <- fst <$> get
-    u <- mgu (apply s t1) (apply s t2)
-    get >>= return . first (u @@) >>= put
-
--------------------------------------------------------------------------------
-
-freshInst :: Scheme -> TypeCheck Type
-freshInst (Forall ks qt) = do
-
-    ts <- mapM newTVar ks
-    return (inst ts qt)
-
-    where
-        inst ts (TAp l r) = TAp (inst ts l) (inst ts r)
-        inst ts (TGen n)  = ts !! n
-        inst ts t         = t
 
 -------------------------------------------------------------------------------
 
