@@ -24,7 +24,7 @@
 
 -------------------------------------------------------------------------------
 
--- There are some extensions necessary - their necessity will be described 
+-- There are some extensions necessary - will be described 
 -- inline.
 
 {-# LANGUAGE GADTs #-}
@@ -39,7 +39,6 @@
 
 module Main where
 
-import System.IO.Unsafe
 import System.Environment
 
 import Control.Applicative
@@ -111,13 +110,13 @@ samplePrograms = [
 -- User defined algebraic data type constructors.
 -- (TODO Address GADTs)
 
-    "   data Cons = forall a => a -> List a -> List a;   \
-    \   data Nil  = forall a => List a;                  \
+    "   data Cons: forall a => a -> List a -> List a;    \
+    \   data Nil: forall a => List a;                    \
     \                                                    \
     \   let length = fun n ->                            \
     \       match n with                                 \
-    \       Nil -> 0;                                    \
-    \       (Cons _ xs) -> 1 + length xs;;               \
+    \           Nil -> 0;                                \
+    \           (Cons _ xs) -> 1 + length xs;;           \
     \                                                    \
     \   length (Cons 1 (Cons 2 Nil)) == 2                ",
 
@@ -462,7 +461,7 @@ exprP =
             pure ((LetExpr .) . TypBind)
                 <*  reserved "data"
                 <*> typP
-                <*  reserved "="
+                <*  reserved ":"
                 <*> typSchP
                 <*  semi
                 <*> exprP
@@ -474,7 +473,7 @@ exprP =
 
         appExprP =
 
-            buildExpressionParser (ifx opConst AssocLeft ops) termP <?> "Application"
+            genExprP opConst AssocLeft ops termP <?> "Application"
 
             where
                 valExprP =
@@ -489,10 +488,15 @@ exprP =
 -- TODO explain this crap
 
 ifx op assoc =
+
     map $ map
         $ flip Infix assoc 
         . uncurry (*>) 
-        . (reservedOp &&& return . op) 
+        . (reservedOp &&& return . op)
+
+genExprP =
+
+    ((buildExpressionParser .) .) . ifx
 
 -------------------------------------------------------------------------------
 
@@ -500,7 +504,7 @@ typP :: Parser Typ
 typP = typAppP <?> "Type Symbol"
 
     where
-        typAppP = buildExpressionParser (ifx fnConst AssocRight [[ "->" ]]) termP
+        typAppP = genExprP fnConst AssocRight [[ "->" ]] termP
         fnConst = (TypApp .) . TypApp . TypSym . TypeSym
         termP   = (typVarP <|> TypSym <$> typSymP) `chainl1` return TypApp
         typVarP = TypVar <$> identifier <?> "Type Variable"
@@ -531,15 +535,151 @@ typSymP = (TypeSym .) . (:) <$> upper <*> identifier
 
 -------------------------------------------------------------------------------
 
---   A. Overview of the algorithm, a TypeCheck monad
---         (TODO) may have to drop polymorphic types to save time.
+-- Overview of the algorithm, a TypeCheck monad
+-- (TODO) may have to drop polymorphic types to save time.
 
-typeCheck  :: Expr -> Either Err Expr
+typeCheck :: Expr -> Either Err Expr
 typeCheck expr =
     fmap (const expr . fst)
-         . flip runStateT (nullSubst, 0)
+         . flip runStateT ([], 0)
          . exprCheck prelude
          $ expr
+
+-------------------------------------------------------------------------------
+
+typErr = lift . Left . Err
+
+uniErr :: (HasKind t, Show t, HasKind u, Show u) => 
+          String -> t -> u -> TypeCheck a
+
+uniErr msg t u = typErr $
+    msg ++ "\n  "
+        ++ show u ++ " (" ++ show (kind u) ++ ") and " 
+        ++ show t ++ " (" ++ show (kind t) ++ ")"
+
+-------------------------------------------------------------------------------
+
+data Kind  = Star | Kfun Kind Kind deriving (Eq, Show)
+
+data Type  = TVar Tyvar | TCon Tycon | TAp  Type Type | TGen Int
+               deriving (Eq, Show)
+ 
+data Tyvar = Tyvar String Kind
+             deriving (Eq, Show)
+
+data Tycon = Tycon String Kind
+             deriving (Eq, Show)
+
+-------------------------------------------------------------------------------
+
+tString  = TCon (Tycon "String" Star)
+tBool    = TCon (Tycon "Boolean" Star)
+tDouble  = TCon (Tycon "Double" Star)
+tList    = TCon (Tycon "[]" (Kfun Star Star))
+tArrow   = TCon (Tycon "->" (Kfun Star (Kfun Star Star)))
+
+infixr 4 `fn`
+fn :: Type -> Type -> Type
+a `fn` b = TAp (TAp tArrow a) b
+
+-------------------------------------------------------------------------------
+
+class HasKind t where
+
+    kind :: t -> Kind
+
+instance HasKind Tyvar where
+
+    kind (Tyvar v k) = k
+
+instance HasKind Tycon where
+
+    kind (Tycon v k) = k
+
+instance HasKind Type where
+
+    kind (TCon tc) = kind tc
+    kind (TVar u)  = kind u
+    kind (TAp (kind -> Kfun _ k) _) = k
+
+-------------------------------------------------------------------------------
+
+-- Type substitutions
+
+type Subst = [(Tyvar, Type)]
+
+-------------------------------------------------------------------------------
+
+apply :: Subst -> Type -> Type
+apply s (TVar (flip lookup s -> Just u)) = u
+apply _ (TVar u) = TVar u
+apply s (TAp l r) = TAp (apply s l) (apply s r)
+apply _ t = t
+
+tv :: Type -> [Tyvar]
+tv (TVar u) = [u]
+tv (TAp l r) = tv l `L.union` tv r
+tv t = []
+
+-------------------------------------------------------------------------------
+
+infixr 4 @@
+(@@) :: Subst -> Subst -> Subst
+s1 @@ s2 = [ (u, apply s1 t) | (u,t) <- s2 ] ++ s1
+
+-------------------------------------------------------------------------------
+
+-- Unification
+
+mgu :: Type -> Type -> TypeCheck Subst
+
+mgu (TAp l r) (TAp l' r') = do 
+    s1 <- mgu l l'
+    s2 <- mgu (apply s1 r) (apply s1 r')
+    return (s2 @@ s1)                           
+                               
+mgu (TVar u) t = varBind u t
+
+mgu t (TVar u) = varBind u t
+
+mgu (TCon t) (TCon u)
+    | t == u = return []
+
+mgu t u = uniErr "types do not unify" t u
+
+-------------------------------------------------------------------------------
+
+-- Kind checking pt 2
+
+varBind :: Tyvar -> Type -> TypeCheck Subst
+varBind u t 
+    | t == TVar u      = return []
+    | u `elem` tv t    = uniErr "occurs check failed" t u
+    | kind u /= kind t = uniErr "kinds do not match" t u
+    | otherwise        = return [(u, t)]            
+            
+-------------------------------------------------------------------------------
+
+-- Type Schemes            
+
+data Scheme where
+    Forall :: [Kind] -> Type -> Scheme
+    deriving (Eq, Show)
+
+-------------------------------------------------------------------------------
+
+quantify :: [Tyvar] -> Type -> Scheme
+quantify vs qt = Forall ks (apply s qt)
+    where
+        vs' = [ v | v <- tv qt, v `elem` vs ]
+        ks  = map kind vs'
+        s   = zip vs' (map TGen [0..])
+
+-------------------------------------------------------------------------------
+
+-- Assumptions
+
+data Assump = String :>: Scheme
 
 prelude :: [Assump]
 prelude = [ 
@@ -548,174 +688,72 @@ prelude = [
     "-"  :>: Forall []     (tDouble `fn` tDouble `fn` tDouble)
     ]   
 
-data Kind  = Star | Kfun Kind Kind deriving (Eq, Show)
+find :: String -> [Assump] -> TypeCheck Scheme
+find i [] = typErr ("unbound identifier: " ++ i)
+find i ((i' :>: sc) : as) 
+    | i == i'   = return sc
+    | otherwise = find i as
 
-data Type  = TVar Tyvar | TCon Tycon | TAp  Type Type | TGen Int
-               deriving (Eq)
- 
-data Tyvar = Tyvar String Kind
-             deriving (Eq, Show)
+-------------------------------------------------------------------------------
 
-data Tycon = Tycon String Kind
-             deriving (Eq, Show)
-
-instance Show Type where
-
-    show (TVar (Tyvar t _)) = t
-    show (TCon (Tycon t _)) = t
-    show (TAp (TCon (Tycon "->" _)) x) = show x ++ " ->"
-    show (TAp x y) = "(" ++ show x ++ " " ++ show y ++ ")"
-    show (TGen t) = "__gen__" ++ show t
-
-
-
-tString  = TCon (Tycon "String" Star)
-tBool    = TCon (Tycon "Boolean" Star)
-tDouble  = TCon (Tycon "Double" Star)
-tList    = TCon (Tycon "[]" (Kfun Star Star))
-tArrow   = TCon (Tycon "->" (Kfun Star (Kfun Star Star)))
-
-infixr      4 `fn`
-fn         :: Type -> Type -> Type
-a `fn` b    = TAp (TAp tArrow a) b
-
-class HasKind t where
-   kind :: t -> Kind
-instance HasKind Tyvar where
-   kind (Tyvar v k) = k
-instance HasKind Tycon where
-   kind (Tycon v k) = k
-instance HasKind Type where
-   kind (TCon tc) = kind tc
-   kind (TVar u)  = kind u
-   kind (TAp t _) = case (kind t) of
-                      (Kfun _ k) -> k
-                      
-
-
-type Subst  = [(Tyvar, Type)]
-
-nullSubst  :: Subst
-nullSubst   = []
-
-class Types t where
-    apply :: Subst -> t -> t
-    tv    :: t -> [Tyvar]
-
-instance Types Type where
-    apply s (TVar u)  = case lookup u s of
-                         Just t  -> t
-                         Nothing -> TVar u
-    apply s (TAp l r) = TAp (apply s l) (apply s r)
-    apply s t         = t
- 
-    tv (TVar u)  = [u]
-    tv (TAp l r) = tv l `L.union` tv r
-    tv t         = []
-
-instance Types a => Types [a] where
-    apply s = map (apply s)
-    tv      = L.nub . concat . map tv    
-
-infixr 4 @@
-(@@)       :: Subst -> Subst -> Subst
-s1 @@ s2    = [ (u, apply s1 t) | (u,t) <- s2 ] ++ s1
-
-mgu     :: Type -> Type -> TypeCheck Subst
-varBind :: Tyvar -> Type -> TypeCheck Subst
-
-mgu (TAp l r) (TAp l' r') = do s1 <- mgu l l'
-                               s2 <- mgu (apply s1 r) (apply s1 r')
-                               return (s2 @@ s1)
-mgu (TVar u) t        = varBind u t
-mgu t (TVar u)        = varBind u t
-mgu (TCon tc1) (TCon tc2)
-           | tc1==tc2 = return nullSubst
-mgu t1 t2 = typErr ("types do not unify;\n  "  ++ show t1 ++ " (" ++ show (kind t1) ++ ") and " ++ show t2 ++ " (" ++ show (kind t2) ++ ")")
-
-typErr = lift . Left . Err
-
-varBind u t | t == TVar u      = return nullSubst
-            | u `elem` tv t    = typErr ("occurs check typErrs\n  " ++ show u ++ " (" ++ show (kind u) ++ ") and " ++ show t ++ " (" ++ show (kind t) ++ ")")
-            | kind u /= kind t = typErr ("kinds do not match\n  " ++ show u ++ " (" ++ show (kind u) ++ ") and " ++ show t ++ " (" ++ show (kind t) ++ ")")
-            | otherwise        = return [(u, t)]
-
-data Scheme = Forall [Kind] Type
-              deriving (Eq, Show)
-
-instance Types Scheme where
-    apply s (Forall ks qt) = Forall ks (apply s qt)
-    tv (Forall ks qt)      = tv qt
-
-quantify      :: [Tyvar] -> Type -> Scheme
-quantify vs qt = Forall ks (apply s qt)
- where vs' = [ v | v <- tv qt, v `elem` vs ]
-       ks  = map kind vs'
-       s   = zip vs' (map TGen [0..])
-
-data Assump = String :>: Scheme
-
-instance Types Assump where
-    apply s (i :>: sc) = i :>: (apply s sc)
-    tv (i :>: sc)      = tv sc
-
-find                 :: String -> [Assump] -> TypeCheck Scheme
-find i []             = typErr ("unbound identifier: " ++ i)
-find i ((i':>:sc):as) = if i==i' then return sc else find i as
+-- A Type Checking Monad
 
 type TypeCheck a = StateT (Subst, Int) (Either Err) a
 
-getSubst   :: TypeCheck Subst
-getSubst    = fst <$> get
+-------------------------------------------------------------------------------
 
-unify      :: Type -> Type -> TypeCheck ()
-unify t1 t2 = do s <- getSubst
-                 u <- mgu (apply s t1) (apply s t2)
-                 extSubst u
-
-extSubst   :: Subst -> TypeCheck ()
-extSubst s' = do
-    (s, i) <- get
-    put (s' @@ s, i)
-
-newTVar    :: Kind -> TypeCheck Type
-newTVar k   = do
+newTVar :: Kind -> TypeCheck Type
+newTVar k = do
     (s, i) <- get
     put (s, i + 1)
     return (TVar (Tyvar ("tvar_" ++ show i) k))
 
-freshInst               :: Scheme -> TypeCheck Type
-freshInst (Forall ks qt) = do ts <- mapM newTVar ks
-                              return (inst ts qt)
+-------------------------------------------------------------------------------
 
-class Instantiate t where
-  inst  :: [Type] -> t -> t
+unify :: Type -> Type -> TypeCheck ()
+unify t1 t2 = do 
+    s <- fst <$> get
+    u <- mgu (apply s t1) (apply s t2)
+    get >>= return . first (u @@) >>= put
 
-instance Instantiate Type where
-  inst ts (TAp l r) = TAp (inst ts l) (inst ts r)
-  inst ts (TGen n)  = ts !! n
-  inst ts t         = t
+-------------------------------------------------------------------------------
 
---instance Instantiate a => Instantiate [a] where
---  inst ts = map (inst ts)
+freshInst :: Scheme -> TypeCheck Type
+freshInst (Forall ks qt) = do
+
+    ts <- mapM newTVar ks
+    return (inst ts qt)
+
+    where
+        inst ts (TAp l r) = TAp (inst ts l) (inst ts r)
+        inst ts (TGen n)  = ts !! n
+        inst ts t         = t
+
+-------------------------------------------------------------------------------
 
 litCheck :: Lit -> Type
 litCheck (StrLit _)  = tString
 litCheck (NumLit _)  = tDouble
 
+-------------------------------------------------------------------------------
+
 pattCheck :: [Assump] -> Patt -> TypeCheck ([Assump], Type)
+
+pattCheck as (ValPatt (LitVal l)) = do
+    return ([], litCheck l)
 
 pattCheck as (ValPatt (SymVal (Sym s))) = do
     t <- newTVar Star
     return ([ s :>: Forall [] t ], t)
 
-pattCheck as (ValPatt (LitVal l)) = do
-    return ([], litCheck l)
+-------------------------------------------------------------------------------
 
 pattCheck as (ValPatt (ConVal (TypSym (TypeSym l)))) = do
     sc <- find l as
     t  <- freshInst sc
     return ([], t)
+
+-------------------------------------------------------------------------------
 
 pattCheck as (ConPatt (TypeSym con) ps) = do
     sc <- find con as
@@ -725,27 +763,19 @@ pattCheck as (ConPatt (TypeSym con) ps) = do
     unify t (foldr fn t' (map snd x))
     return (L.concat (map fst x), t')
 
-pattCheck as x = typErr $ show x
+-------------------------------------------------------------------------------
 
-
-db :: Show a => a -> a
-db x = unsafePerformIO $ do putStrLn$ "-- " ++ (show x)
-                            return x
-
-
+-- TODO Get rid of this function
 
 toAssump :: Typ -> TypSch -> TypeCheck [Assump]
 toAssump n sc = do
     name  <- getName n
-    qt    <- getQt (db sc)
+    qt    <- getQt sc
     return [ name :>: qt ]
 
     where
-        getName t = case t of 
-            TypSym (TypeSym n)   -> lift (Right n)
-            _          -> typErr ("Illegal data declaration\n  " ++ show t)
-
--- fix kind inference
+        getName (TypSym (TypeSym n)) = lift (Right n)
+        getName t = typErr ("Illegal data declaration\n  " ++ show t)
 
         getQt :: TypSch -> TypeCheck Scheme
         getQt (TypSch tvars typ) =
@@ -758,9 +788,27 @@ toAssump n sc = do
         toTyp (TypApp f x) k =
             TAp (toTyp f (Kfun Star k)) (toTyp x Star)
 
-             
+-------------------------------------------------------------------------------
 
 exprCheck :: [Assump] -> Expr -> TypeCheck Type
+
+exprCheck as (VarExpr (LitVal l)) =
+    return (litCheck l)
+
+exprCheck as (VarExpr (SymVal (Sym sym))) =
+    find sym as >>= freshInst
+
+exprCheck as (VarExpr (ConVal (TypSym (TypeSym sym)))) =
+    find sym as >>= freshInst
+
+-------------------------------------------------------------------------------
+
+exprCheck as (LetExpr (TypBind typ typSch) expr) = do
+
+    typAs <- toAssump typ typSch
+    exprCheck (typAs ++ as) expr
+
+-------------------------------------------------------------------------------
 
 exprCheck as (LetExpr (SymBind (Sym sym) val) expr) = do
     symT <- newTVar Star
@@ -768,10 +816,7 @@ exprCheck as (LetExpr (SymBind (Sym sym) val) expr) = do
     unify valT symT
     exprCheck ((sym :>: Forall [] symT) : as) expr
 
-exprCheck as (LetExpr (TypBind typ typSch) expr) = do
-
-    typAs <- toAssump typ typSch
-    exprCheck (typAs ++ as) expr
+-------------------------------------------------------------------------------
 
 exprCheck as (AppExpr f x) = do
     fT   <- exprCheck as f
@@ -785,15 +830,7 @@ exprCheck as (AbsExpr (Sym sym) expr) = do
     res <- exprCheck ((sym :>: Forall [] x) : as) expr
     return (x `fn` res)
 
-exprCheck as (VarExpr (SymVal (Sym sym))) =
-    find sym as >>= freshInst
-
-exprCheck as (VarExpr (ConVal (TypSym (TypeSym sym)))) =
-    find sym as >>= freshInst
-
-
-exprCheck as (VarExpr (LitVal l)) =
-    return (litCheck l)
+-------------------------------------------------------------------------------
 
 exprCheck as (MatExpr expr ((patt, res):[])) = do
     exprT <- exprCheck as expr
@@ -810,16 +847,7 @@ exprCheck as (MatExpr expr ((patt, res):es)) = do
     unify resT esT
     return resT
 
-    
-
-
-
-
---   B. Instantiation of type variables
-
---   C. Unification
-
---   D. Generalization
+-------------------------------------------------------------------------------
 
 
 
@@ -839,6 +867,8 @@ instance ToJExpr Val where
 
     toJExpr (SymVal s) = toJExpr s
     toJExpr (LitVal l) = toJExpr l
+    toJExpr (ConVal (TypSym (TypeSym s))) = ref s
+
 
 instance ToJExpr Sym where
 
@@ -862,6 +892,7 @@ intro sym f expr = [jmacroE|
     }
 
 |]
+
 
 instance ToJExpr Expr where
 
@@ -887,6 +918,21 @@ instance ToJExpr Expr where
 
     |]
 
+-- TODO I need to be curried like a mofo!
+
+    toJExpr (LetExpr (TypBind (TypSym (TypeSym sym)) typsch) expr) = [jmacroE|
+
+        function() {
+            var scheme = function() {
+                this.attrs = arguments;
+                this.type  = `(sym)`;
+            };
+
+            `(intro sym (const scheme) expr)`()
+        }()
+
+    |]
+
     toJExpr (MatExpr val ((patt, expr):cases)) = [jmacroE|
 
         (function() {
@@ -906,6 +952,8 @@ instance ToJExpr Expr where
         })()
 
     |]
+
+    toJExpr x = error (show x)
 
 data Match = Match Expr Patt JExpr deriving (Show)
 
@@ -932,6 +980,20 @@ instance ToJExpr Match where
 
     |]
 
+    toJExpr (Match val (ValPatt (ConVal (TypSym (TypeSym s)))) scope) = [jmacroE|
+
+        `(val)`.type == `(s)`
+
+    |]
+
+    toJExpr (Match val (ConPatt (TypeSym sym) ps) _) =
+
+        [jmacroE| `(val)`.type == `(sym)` |]
+
+    toJExpr x = error (show x)
+
+
+
 
 -- UTILS
 
@@ -940,9 +1002,8 @@ toText :: JExpr  -> Either Err String
 toText = Right . show . renderJs  
 
 
-unwrap (Right x) = putStrLn x >> putStrLn "----------------------"
+unwrap (Right x) = putStrLn x        >> putStrLn "----------------------"
 unwrap (Left x)  = putStrLn (show x) >> putStrLn "----------------------"
-
 
 -- V. Wrap up, run the samples from the intro.
 
