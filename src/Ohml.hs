@@ -30,6 +30,8 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 -------------------------------------------------------------------------------
 
@@ -213,32 +215,8 @@ data Expr where
 
 data Bind where
 
-    SymBind :: Sym -> Expr   -> Bind
-    TypBind :: Typ -> TypSch -> Bind
-
-    deriving (Show)
-
--------------------------------------------------------------------------------
-
--- TODO describe the type signature AST
-
-data Typ where
-
-    TypSym :: TypeSym -> Typ
-    TypVar :: String -> Typ
-    TypApp :: Typ -> Typ -> Typ
-
-    deriving (Show)  
-
-data TypeSym where 
-
-    TypeSym :: String -> TypeSym
-
-    deriving (Show)
-
-data TypSch where
-
-    TypSch :: [Sym] -> Typ -> TypSch
+    SymBind :: Sym -> Expr -> Bind
+    TypBind :: TypeSym () -> TypSch () -> Bind
 
     deriving (Show)
     
@@ -251,7 +229,7 @@ data TypSch where
 data Patt where
 
     ValPatt :: Val -> Patt
-    ConPatt :: TypeSym -> [Patt] -> Patt
+    ConPatt :: TypeSym () -> [Patt] -> Patt
 
     deriving (Show)
 
@@ -263,7 +241,7 @@ data Val where
 
     SymVal  :: Sym -> Val
     LitVal  :: Lit -> Val
-    ConVal  :: Typ -> Val
+    ConVal  :: Typ () -> Val
 
     deriving (Show)
 
@@ -271,9 +249,7 @@ data Val where
 
 -- Symbols and literals, yada yada yada.
 
-newtype Sym = Sym String
-
-    deriving (Show)
+newtype Sym = Sym String deriving (Show, Eq)
 
 data Lit where
 
@@ -281,6 +257,33 @@ data Lit where
     NumLit  :: Double -> Lit
 
     deriving (Show)
+
+-------------------------------------------------------------------------------
+
+-- TODO describe the type signature AST
+
+data Typ a where
+
+    TypSym :: TypeSym a -> Typ a
+    TypVar :: TypeVar a -> Typ a
+    TypApp :: Typ a -> Typ a -> Typ a
+
+    TypGen :: Int -> Typ Kind
+
+deriving instance (Show a) => Show (Typ a)  
+deriving instance (Eq a) => Eq (Typ a)  
+
+data TypeVar a where 
+    TypeVar :: a -> String -> TypeVar a
+    deriving (Show, Eq)
+
+data TypeSym a where 
+    TypeSym :: a -> String -> TypeSym a
+    deriving (Show, Eq)
+
+data TypSch a where
+    TypSch :: [TypeVar a] -> Typ a -> TypSch a
+    deriving (Show, Eq)
 
 
 
@@ -290,7 +293,7 @@ data Lit where
 
 -------------------------------------------------------------------------------
 
--- ... goes to Hackage, downloades Parsec ...
+-- ... goes to Hackage, downloads Parsec ...
 
 -------------------------------------------------------------------------------
 
@@ -305,7 +308,7 @@ type MyParser a = String -> Either Err (a, String)
 
 -------------------------------------------------------------------------------
 
--- TODO Applicative Functor, Functor & Monad members.
+-- TODO Applicative Functor, Functor & Monad instances.
 
 -------------------------------------------------------------------------------
 
@@ -460,12 +463,12 @@ exprP =
         typExprP =
             pure ((LetExpr .) . TypBind)
                 <*  reserved "data"
-                <*> typP
+                <*> typSymP
                 <*  reserved ":"
                 <*> typSchP
                 <*  semi
                 <*> exprP
-                <?> "Type Expression"
+                <?> "Typ Kind Expression"
 
 -------------------------------------------------------------------------------
 
@@ -500,30 +503,30 @@ genExprP =
 
 -------------------------------------------------------------------------------
 
-typP :: Parser Typ
-typP = typAppP <?> "Type Symbol"
+typP :: Parser (Typ ())
+typP = typAppP <?> "Typ Kind Symbol"
 
     where
         typAppP = genExprP fnConst AssocRight [[ "->" ]] termP
-        fnConst = (TypApp .) . TypApp . TypSym . TypeSym
+        fnConst = (TypApp .) . TypApp . TypSym . TypeSym ()
         termP   = (typVarP <|> TypSym <$> typSymP) `chainl1` return TypApp
-        typVarP = TypVar <$> identifier <?> "Type Variable"
+        typVarP = TypVar . TypeVar () <$> identifier <?> "Typ Kind Variable"
 
 -------------------------------------------------------------------------------
 
-typSchP :: Parser TypSch
+typSchP :: Parser (TypSch ())
 typSchP =
-    pure (TypSch . (:[]) . Sym)
+    pure (TypSch . (:[]) . TypeVar ())
         <*  reserved "forall"
         <*> identifier
         <*  reservedOp "=>"
         <*> typP
-        <?> "Type Scheme"
+        <?> "Typ Kind Scheme"
 
 -------------------------------------------------------------------------------
 
-typSymP :: Parser TypeSym
-typSymP = (TypeSym .) . (:) <$> upper <*> identifier
+typSymP :: Parser (TypeSym ())
+typSymP = (TypeSym () .) . (:) <$> upper <*> identifier
 
 -------------------------------------------------------------------------------
 
@@ -531,7 +534,7 @@ typSymP = (TypeSym .) . (:) <$> upper <*> identifier
 
 -------------------------------------------------------------------------------
 
--- III. Type Inference.
+-- III. Typ Kind Inference.
 
 -------------------------------------------------------------------------------
 
@@ -544,7 +547,7 @@ typeCheck expr =
          . exprCheck prelude
          $ expr
 
--- A Type Checking Monad
+-- A `TypeCheck` container type
 
 type TypeCheck a = StateT (Subst, Int) (Either Err) a
 
@@ -566,87 +569,82 @@ uniErr msg t u = typErr $
 
 -- There are some new vocab words.
 
-data Kind  = Star | Kfun Kind Kind deriving (Eq, Show)
+data Kind where
+
+    Star :: Kind
+    Kfun :: Kind -> Kind -> Kind
+
+    deriving (Eq, Show)
 
 class HasKind t where
-
     kind :: t -> Kind
 
-instance HasKind Tyvar where
+instance HasKind (TypeVar Kind) where
 
-    kind (Tyvar v k) = k
+    kind (TypeVar k v) = k
 
-instance HasKind Tycon where
+instance HasKind (TypeSym Kind) where
 
-    kind (Tycon v k) = k
+    kind (TypeSym k v) = k
 
-instance HasKind Type where
+instance HasKind (Typ Kind) where
 
-    kind (TCon tc) = kind tc
-    kind (TVar u)  = kind u
-    kind (TAp (kind -> Kfun _ k) _) = k
-
--------------------------------------------------------------------------------
-
--- And we need a parallel representation of the type system to compensate
--- (TODO get rid of this!)
-
-data Type  = TVar Tyvar | TCon Tycon | TAp  Type Type | TGen Int
-               deriving (Eq, Show)
- 
-data Tyvar = Tyvar String Kind
-             deriving (Eq, Show)
-
-data Tycon = Tycon String Kind
-             deriving (Eq, Show)
+    kind (TypSym tc) = kind tc
+    kind (TypVar u)  = kind u
+    kind (TypApp (kind -> Kfun _ k) _) = k
 
 -------------------------------------------------------------------------------
 
 -- Some familiar types defined in out new vocabulary.  Tidy!
 
-tString  = TCon (Tycon "String" Star)
-tBool    = TCon (Tycon "Boolean" Star)
-tDouble  = TCon (Tycon "Double" Star)
-tList    = TCon (Tycon "[]" (Kfun Star Star))
-tArrow   = TCon (Tycon "->" (Kfun Star (Kfun Star Star)))
+tString  = TypSym (TypeSym Star "String" )
+tBool    = TypSym (TypeSym Star "Boolean")
+tDouble  = TypSym (TypeSym Star "Double" )
+tList    = TypSym (TypeSym (Kfun Star Star) "[]")
+tArrow   = TypSym (TypeSym (Kfun Star (Kfun Star Star)) "->")
 
 -- Annoying As Fuck (tm).
 
-fn :: Type -> Type -> Type
-fn a b = TAp (TAp tArrow a) b
+infixr 4 `fn`
+
+fn :: Typ Kind -> Typ Kind -> Typ Kind
+fn a b = TypApp (TypApp tArrow a) b
 
 -------------------------------------------------------------------------------
 
 -- We need the ability to generate unique type variables 
 
-newTVar :: Kind -> TypeCheck Type
-newTVar k = do
+newTypVar :: Kind -> TypeCheck (Typ Kind)
+newTypVar k = do
     (s, i) <- get
     put (s, i + 1)
-    return (TVar (Tyvar ("tvar_" ++ show i) k))
+    return (TypVar (TypeVar k ("tvar_" ++ show i)))
 
 -------------------------------------------------------------------------------
 
+-- Unification
+-- -----------
+
 -- Type substitutions
 
-type Subst = [(Tyvar, Type)]
+type Subst = [(TypeVar Kind, Typ Kind)]
 
 -------------------------------------------------------------------------------
 
 -- Substitutions can be applied to types
 
-apply :: Subst -> Type -> Type
-apply s (TVar (flip lookup s -> Just u)) = u
-apply _ (TVar u) = TVar u
-apply s (TAp l r) = TAp (apply s l) (apply s r)
+apply :: Subst -> Typ Kind -> Typ Kind
+apply s (TypVar (flip lookup s -> Just u)) = u
+apply _ (TypVar u) = TypVar u
+apply s (TypApp l r) = TypApp (apply s l) (apply s r)
 apply _ t = t
 
 -- and it will be useful for calculating substitutions to have a way
 -- to get the free `TyVar`s in a `Type`
 
-tv :: Type -> [Tyvar]
-tv (TVar u) = [u]
-tv (TAp l r) = tv l `L.union` tv r
+tv :: Typ Kind -> [TypeVar Kind]
+tv (TypVar u) = [u]
+tv (TypApp l r) = tv l `L.union` tv r
 tv t = []
 
 -------------------------------------------------------------------------------
@@ -661,22 +659,22 @@ ext sub1 sub2 = [ (u, apply sub1 t) | (u,t) <- sub2 ] ++ sub1
 
 -- M.ost G.eneral U.nifier modifies the substitution environment such that
 -- both input types are the same.  This is the Principal Type;  further 
--- inference can only restrict this type further.
+-- inference can only restrict this type.
 
-mgu :: Type -> Type -> TypeCheck Subst
+mgu :: Typ Kind -> Typ Kind -> TypeCheck Subst
 
-mgu (TAp f x) (TAp g y) = do 
+mgu (TypApp f x) (TypApp g y) = do 
     sub1 <- f `mgu` g
     sub2 <- apply sub1 x `mgu` apply sub1 y
     return (sub2 `ext` sub1)                           
                                
-mgu (TVar u) t =
+mgu (TypVar u) t =
     u `varBind` t
 
-mgu t (TVar u) =
+mgu t (TypVar u) =
     u `varBind` t
 
-mgu (TCon t) (TCon u) | t == u =
+mgu (TypSym t) (TypSym u) | t == u =
     return []
 
 mgu t u =
@@ -688,10 +686,10 @@ mgu t u =
 -- sure it's valid by (1) checking that the kinds match, and (2) checking
 -- that we are not constructing a replacement for a type into itself.
 
-varBind :: Tyvar -> Type -> TypeCheck Subst
+varBind :: TypeVar Kind -> Typ Kind -> TypeCheck Subst
 
 varBind u t 
-    | t == TVar u      = return []
+    | t == TypVar u      = return []
     | u `elem` tv t    = uniErr "occurs check failed" t u  -- (2)
     | kind u /= kind t = uniErr "kinds do not match"  t u  -- (1)
     | otherwise        = return [(u, t)]            
@@ -700,7 +698,7 @@ varBind u t
 
 -- With these tools in hand, we can implement the Unificiation step
 
-unify :: Type -> Type -> TypeCheck ()
+unify :: Typ Kind -> Typ Kind -> TypeCheck ()
 unify t1 t2 = do 
     s <- fst <$> get
     u <- apply s t1 `mgu` apply s t2
@@ -712,35 +710,37 @@ unify t1 t2 = do
 -- Generalization
 -- --------------
 
--- Type Schemes            
+-- Typ Kind Schemes            
 
 data Scheme where
-    Forall :: [Kind] -> Type -> Scheme
+    Forall :: [Kind] -> Typ Kind -> Scheme
     deriving (Eq, Show)
 
 -------------------------------------------------------------------------------
 
 -- Generalizing types
 
-quantify :: [Tyvar] -> Type -> Scheme
+quantify :: [TypeVar Kind] -> Typ Kind -> Scheme
 quantify vars typ = Forall kinds (apply subs typ)
     where
         qVars = [ var | var <- tv typ, var `elem` vars ]
         kinds = map kind qVars
-        subs  = zip qVars (map TGen [ 0 .. ])
+        subs  = zip qVars (map TypGen [ 0 .. ])
+
+-------------------------------------------------------------------------------
 
 -- ... and instantiating them again.
 
-freshInst :: Scheme -> TypeCheck Type
+freshInst :: Scheme -> TypeCheck (Typ Kind)
 freshInst (Forall ks qt) = do
 
-    ts <- mapM newTVar ks
+    ts <- mapM newTypVar ks
     return (inst ts qt)
 
     where
-        inst ts (TAp l r) = TAp (inst ts l) (inst ts r)
-        inst ts (TGen n)  = ts !! n
-        inst ts t         = t
+        inst ts (TypApp l r) = TypApp (inst ts l) (inst ts r)
+        inst ts (TypGen n) = ts !! n
+        inst ts t = t
 
 -------------------------------------------------------------------------------
 
@@ -749,11 +749,11 @@ freshInst (Forall ks qt) = do
 data Assump = String :>: Scheme
 
 prelude :: [Assump]
-prelude = [ 
-    "==" :>: Forall [Star] (TGen 0 `fn` TGen 0 `fn` TGen 0),
-    "+"  :>: Forall []     (tDouble `fn` tDouble `fn` tDouble),
-    "-"  :>: Forall []     (tDouble `fn` tDouble `fn` tDouble)
-    ]   
+prelude =
+
+    [ "==" :>: Forall [Star] (TypGen 0 `fn` TypGen 0 `fn` TypGen 0)
+    , "+"  :>: Forall []     (tDouble `fn` tDouble `fn` tDouble)
+    , "-"  :>: Forall []     (tDouble `fn` tDouble `fn` tDouble) ]
 
 find :: String -> [Assump] -> TypeCheck Scheme
 find i [] = typErr ("unbound identifier: " ++ i)
@@ -763,66 +763,76 @@ find i ((i' :>: sc) : as)
 
 -------------------------------------------------------------------------------
 
-litCheck :: Lit -> Type
+-- Inference
+-- ---------
+
+-- Literals
+
+litCheck :: Lit -> Typ Kind
 litCheck (StrLit _)  = tString
 litCheck (NumLit _)  = tDouble
 
 -------------------------------------------------------------------------------
 
-pattCheck :: [Assump] -> Patt -> TypeCheck ([Assump], Type)
+-- Patterns are a bit more complicated.
+
+pattCheck :: [Assump] -> Patt -> TypeCheck ([Assump], Typ Kind)
 
 pattCheck as (ValPatt (LitVal l)) = do
     return ([], litCheck l)
 
+-- For starters, they can introduce bindings and hence `Assump`s.
+
 pattCheck as (ValPatt (SymVal (Sym s))) = do
-    t <- newTVar Star
+    t <- newTypVar Star
     return ([ s :>: Forall [] t ], t)
 
 -------------------------------------------------------------------------------
 
-pattCheck as (ValPatt (ConVal (TypSym (TypeSym l)))) = do
+pattCheck as (ValPatt (ConVal (TypSym (TypeSym () l)))) = do
     sc <- find l as
     t  <- freshInst sc
     return ([], t)
 
 -------------------------------------------------------------------------------
 
-pattCheck as (ConPatt (TypeSym con) ps) = do
+-- In order to check destruction patterns, we need to recreate the implied
+-- (abstraction) type of the arguments, and unify with the constructor's
+-- `Assump` from the environment.  
+
+pattCheck as (ConPatt (TypeSym () con) ps) = do
     sc <- find con as
     x  <- sequence (map (pattCheck as) ps)
-    t' <- newTVar Star
+    t' <- newTypVar Star
     t  <- freshInst sc
     unify t (foldr fn t' (map snd x))
     return (L.concat (map fst x), t')
 
 -------------------------------------------------------------------------------
 
--- TODO Get rid of this function
+-- We need a way to get typing from the parsed 
 
-toAssump :: Typ -> TypSch -> TypeCheck [Assump]
-toAssump n sc = do
-    name  <- getName n
-    qt    <- getQt sc
-    return [ name :>: qt ]
+toAssump :: TypeSym () -> TypSch () -> [Assump]
+toAssump (TypeSym () name) (TypSch tvars typ) =
+
+    [ name :>: quantify (toVar <$> tvars) (toTyp typ Star) ]
 
     where
-        getName (TypSym (TypeSym n)) = lift (Right n)
-        getName t = typErr ("Illegal data declaration\n  " ++ show t)
+ 
+-- Kind inference
 
-        getQt :: TypSch -> TypeCheck Scheme
-        getQt (TypSch tvars typ) =
-            return $ quantify (map toVar tvars) (toTyp typ Star)
+        toVar (TypeVar () n) = TypeVar Star n
 
-        toVar (Sym n) = Tyvar n Star
-
-        toTyp (TypSym (TypeSym n)) k = TCon $ Tycon n k
-        toTyp (TypVar n) k = TVar $ Tyvar n k
+        toTyp (TypSym (TypeSym () n)) k = TypSym (TypeSym k n)
+        toTyp (TypVar (TypeVar () n)) k = TypVar (TypeVar k n)
         toTyp (TypApp f x) k =
-            TAp (toTyp f (Kfun Star k)) (toTyp x Star)
+            TypApp (toTyp f (Kfun Star k)) (toTyp x Star)
 
 -------------------------------------------------------------------------------
 
-exprCheck :: [Assump] -> Expr -> TypeCheck Type
+-- Expressions
+
+exprCheck :: [Assump] -> Expr -> TypeCheck (Typ Kind)
 
 exprCheck as (VarExpr (LitVal l)) =
     return (litCheck l)
@@ -830,20 +840,21 @@ exprCheck as (VarExpr (LitVal l)) =
 exprCheck as (VarExpr (SymVal (Sym sym))) =
     find sym as >>= freshInst
 
-exprCheck as (VarExpr (ConVal (TypSym (TypeSym sym)))) =
+exprCheck as (VarExpr (ConVal (TypSym (TypeSym () sym)))) =
     find sym as >>= freshInst
 
 -------------------------------------------------------------------------------
 
 exprCheck as (LetExpr (TypBind typ typSch) expr) = do
-
-    typAs <- toAssump typ typSch
-    exprCheck (typAs ++ as) expr
+    
+    exprCheck (toAssump typ typSch ++ as) expr
 
 -------------------------------------------------------------------------------
 
+-- TODO generalize the shit out of `sym`
+
 exprCheck as (LetExpr (SymBind (Sym sym) val) expr) = do
-    symT <- newTVar Star
+    symT <- newTypVar Star
     valT <- exprCheck ((sym :>: Forall [] symT) : as) val
     unify valT symT
     exprCheck ((sym :>: Forall [] symT) : as) expr
@@ -853,12 +864,12 @@ exprCheck as (LetExpr (SymBind (Sym sym) val) expr) = do
 exprCheck as (AppExpr f x) = do
     fT   <- exprCheck as f
     xT   <- exprCheck as x
-    appT <- newTVar Star
+    appT <- newTypVar Star
     unify (xT `fn` appT) fT
     return appT
 
 exprCheck as (AbsExpr (Sym sym) expr) = do
-    x   <- newTVar Star
+    x   <- newTypVar Star
     res <- exprCheck ((sym :>: Forall [] x) : as) expr
     return (x `fn` res)
 
@@ -881,8 +892,6 @@ exprCheck as (MatExpr expr ((patt, res):es)) = do
 
 -------------------------------------------------------------------------------
 
-
-
 -- IV. Code Generation (25 minutes)
 
 --   A. Introduction to JMacro
@@ -899,8 +908,7 @@ instance ToJExpr Val where
 
     toJExpr (SymVal s) = toJExpr s
     toJExpr (LitVal l) = toJExpr l
-    toJExpr (ConVal (TypSym (TypeSym s))) = ref s
-
+    toJExpr (ConVal (TypSym (TypeSym () s))) = ref s
 
 instance ToJExpr Sym where
 
@@ -910,7 +918,6 @@ instance ToJExpr Lit where
 
     toJExpr (StrLit s)  = toJExpr s
     toJExpr (NumLit n)  = toJExpr n
-
 
 --   D. Hygenic introduction of variables
 
@@ -952,7 +959,7 @@ instance ToJExpr Expr where
 
 -- TODO I need to be curried like a mofo!
 
-    toJExpr (LetExpr (TypBind (TypSym (TypeSym sym)) typsch) expr) = [jmacroE|
+    toJExpr (LetExpr (TypBind (TypeSym () sym) typsch) expr) = [jmacroE|
 
         function() {
             var scheme = function() {
@@ -1012,13 +1019,13 @@ instance ToJExpr Match where
 
     |]
 
-    toJExpr (Match val (ValPatt (ConVal (TypSym (TypeSym s)))) scope) = [jmacroE|
+    toJExpr (Match val (ValPatt (ConVal (TypSym (TypeSym () s)))) scope) = [jmacroE|
 
         `(val)`.type == `(s)`
 
     |]
 
-    toJExpr (Match val (ConPatt (TypeSym sym) ps) _) =
+    toJExpr (Match val (ConPatt (TypeSym () sym) ps) _) =
 
         [jmacroE| `(val)`.type == `(sym)` |]
 
