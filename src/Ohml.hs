@@ -5,21 +5,23 @@
 
 -------------------------------------------------------------------------------
 
--- * [Write Yourself a Scheme in 48hrs]
---   (http://en.wikibooks.org/wiki/Write_Yourself_a_Scheme_in_48_Hours),
+-- (1) [Write Yourself a Scheme in 48hrs]
+--     (http://en.wikibooks.org/wiki/Write_Yourself_a_Scheme_in_48_Hours),
 
--- * [Parsec]
---   (http://www.haskell.org/haskellwiki/Parsec)
+-- (2) [Parsec]
+--     (http://www.haskell.org/haskellwiki/Parsec)
 
--- * [JMacro]
---   (http://www.haskell.org/haskellwiki/Jmacro)
+-- (3) [JMacro]
+--     (http://www.haskell.org/haskellwiki/Jmacro)
 
--- * [Typing Haskell in Haskell]
---   (]http://web.cecs.pdx.edu/~mpj/thih/)
+-- (4) [Typing Haskell in Haskell]
+--     (http://web.cecs.pdx.edu/~mpj/thih/)
 
 -- I. -------------------------------------------------------------------------
 
--- Quick intro, explicitly skip ML history, high level overview 
+-- Why?
+
+-- * Fun!
 
 -------------------------------------------------------------------------------
 
@@ -47,7 +49,6 @@ import Control.Monad
 import Control.Monad.State
 import Control.Arrow
 
-import qualified Data.Map  as M
 import qualified Data.List as L
 
 -------------------------------------------------------------------------------
@@ -109,7 +110,7 @@ samplePrograms = [
 -------------------------------------------------------------------------------
 
 -- User defined algebraic data type constructors.
--- (TODO Address GADTs)
+-- (TODO Address GADTs - these are not)
 
     "   data Cons: forall a => a -> List a -> List a;    \
     \   data Nil: forall a => List a;                    \
@@ -134,6 +135,12 @@ samplePrograms = [
     "   4 + \"whoops\"   ",
 
     "   match 3 + 3 with \"gotcha\" -> false;   ",
+
+    "   data Just: forall a => a -> Maybe a   \
+    \   data None: forall a => Maybe a        \
+    \                                         \
+    \   match Just 5 with                     \
+    \       Just \"blammo\"                   ",
 
 -------------------------------------------------------------------------------
 
@@ -164,7 +171,7 @@ samplePrograms = [
 -- emits Javascript to stdout.
 
 main :: IO ()
-main  = do
+main = do
 
     source <- head <$> getArgs
     case compile source of
@@ -210,8 +217,6 @@ data Expr where
 -- this is not necessary)
 
 -------------------------------------------------------------------------------
-
--- TODO Describe symbol and type bindings
 
 data Bind where
 
@@ -273,19 +278,25 @@ data Typ a where
 deriving instance (Show a) => Show (Typ a)  
 deriving instance (Eq a) => Eq (Typ a)  
 
-data TypeVar a where 
-    TypeVar :: a -> String -> TypeVar a
-    deriving (Show, Eq)
+data TypeVar a where
+
+    TypeVarP :: String -> TypeVar ()
+    TypeVarT :: Kind -> String -> TypeVar Kind
+
+deriving instance (Show a) => Show (TypeVar a)  
+deriving instance (Eq a) => Eq (TypeVar a)  
 
 data TypeSym a where 
-    TypeSym :: a -> String -> TypeSym a
-    deriving (Show, Eq)
+
+    TypeSymP :: String -> TypeSym ()
+    TypeSymT :: Kind -> String -> TypeSym Kind
+
+deriving instance (Show a) => Show (TypeSym a)  
+deriving instance (Eq a) => Eq (TypeSym a)  
 
 data TypSch a where
     TypSch :: [TypeVar a] -> Typ a -> TypSch a
     deriving (Show, Eq)
-
-
 
 -- III. -----------------------------------------------------------------------
 
@@ -350,17 +361,23 @@ ohmlDef = emptyDef {
     T.identStart      = lower <|> char '_'
 }
 
+-- Record wild card makes `TokenParser` easy on the eyes.
+
 T.TokenParser { .. } = T.makeTokenParser ohmlDef
 
 -------------------------------------------------------------------------------
 
--- The simplest parsers are for `Sym` and `Val`
--- (TODO explain `<$>`)
+-- The simplest parsers are for `Sym` and `TypSym`
 
 symP :: Parser Sym
 symP = Sym <$> identifier
 
--- (TODO explain `<|>`)
+typSymP :: Parser (TypeSym ())
+typSymP = (TypeSymP .) . (:) <$> upper <*> identifier
+
+-- "Alternative" combinator will evaluate to its second argument, only if
+-- it's first argument fails nd consumes no input - backtracking is explicit
+-- via `try`.
 
 valP :: Parser Val
 valP =
@@ -370,23 +387,16 @@ valP =
 
 -------------------------------------------------------------------------------
 
--- So the next simplest parser we can define is the parser for literals
 -- The Literal parser is a simple parser which generates Lit values.
--- TODO explain `<|>` and `try`
 
 litP :: Parser Lit
 litP = stringL <|> numL
 
--------------------------------------------------------------------------------
-
--- Here, `stringLiteral` and `float` come from `T.TokenParser`.
--- TODO explain `<$>`
+-- Here, `stringLiteral` and `naturalOrFloat` come from `T.TokenParser`.
 
     where
         stringL = StrLit <$> stringLiteral
         numL    = NumLit . toDouble <$> naturalOrFloat
-
--- with the help of some helpers.
 
         toDouble (Left i)  = fromInteger i
         toDouble (Right f) = f
@@ -504,29 +514,44 @@ genExprP =
 -------------------------------------------------------------------------------
 
 typP :: Parser (Typ ())
-typP = typAppP <?> "Typ Kind Symbol"
+typP = typAppP <?> "Type Symbol"
 
     where
         typAppP = genExprP fnConst AssocRight [[ "->" ]] termP
-        fnConst = (TypApp .) . TypApp . TypSym . TypeSym ()
+        fnConst = (TypApp .) . TypApp . TypSym . TypeSymP
         termP   = (typVarP <|> TypSym <$> typSymP) `chainl1` return TypApp
-        typVarP = TypVar . TypeVar () <$> identifier <?> "Typ Kind Variable"
+        typVarP = TypVar . TypeVarP <$> identifier <?> "Type Variable"
 
 -------------------------------------------------------------------------------
 
 typSchP :: Parser (TypSch ())
 typSchP =
-    pure (TypSch . (:[]) . TypeVar ())
+    pure (TypSch . (:[]) . TypeVarP)
         <*  reserved "forall"
         <*> identifier
         <*  reservedOp "=>"
         <*> typP
-        <?> "Typ Kind Scheme"
+        <?> "Type Scheme"
 
 -------------------------------------------------------------------------------
 
-typSymP :: Parser (TypeSym ())
-typSymP = (TypeSym () .) . (:) <$> upper <*> identifier
+
+
+--toAssump :: TypeSym () -> TypSch () -> [Assump]
+--toAssump (TypeSym () name) (TypSch tvars typ) =
+
+--    [ name :>: quantify (toVar <$> tvars) (toTyp typ Star) ]
+
+--    where
+ 
+---- Kind inference
+
+--        toVar (TypeVar () n) = TypeVar Star n
+
+--        toTyp (TypSym (TypeSym () n)) k = TypSym (TypeSym k n)
+--        toTyp (TypVar (TypeVar () n)) k = TypVar (TypeVar k n)
+--        toTyp (TypApp f x) k =
+--            TypApp (toTyp f (Kfun Star k)) (toTyp x Star)
 
 -------------------------------------------------------------------------------
 
@@ -534,22 +559,21 @@ typSymP = (TypeSym () .) . (:) <$> upper <*> identifier
 
 -------------------------------------------------------------------------------
 
--- III. Typ Kind Inference.
+-- III. Type Inference.
 
 -------------------------------------------------------------------------------
 
 -- Overview of the algorithm.
 
-typeCheck :: Expr -> Either Err Expr
-typeCheck expr =
-    fmap (const expr . fst)
-         . flip runStateT ([], 0)
-         . exprCheck prelude
-         $ expr
-
--- A `TypeCheck` container type
-
 type TypeCheck a = StateT (Subst, Int) (Either Err) a
+
+typeCheck :: Expr -> Either Err Expr
+typeCheck =
+
+    uncurry fmap 
+         <<< const
+         &&& flip runStateT ([], 0)
+         . exprCheck prelude
 
 -------------------------------------------------------------------------------
 
@@ -581,11 +605,11 @@ class HasKind t where
 
 instance HasKind (TypeVar Kind) where
 
-    kind (TypeVar k v) = k
+    kind (TypeVarT k v) = k
 
 instance HasKind (TypeSym Kind) where
 
-    kind (TypeSym k v) = k
+    kind (TypeSymT k v) = k
 
 instance HasKind (Typ Kind) where
 
@@ -597,11 +621,11 @@ instance HasKind (Typ Kind) where
 
 -- Some familiar types defined in out new vocabulary.  Tidy!
 
-tString  = TypSym (TypeSym Star "String" )
-tBool    = TypSym (TypeSym Star "Boolean")
-tDouble  = TypSym (TypeSym Star "Double" )
-tList    = TypSym (TypeSym (Kfun Star Star) "[]")
-tArrow   = TypSym (TypeSym (Kfun Star (Kfun Star Star)) "->")
+tString  = TypSym (TypeSymT Star "String" )
+tBool    = TypSym (TypeSymT Star "Boolean")
+tDouble  = TypSym (TypeSymT Star "Double" )
+tList    = TypSym (TypeSymT (Kfun Star Star) "[]")
+tArrow   = TypSym (TypeSymT (Kfun Star (Kfun Star Star)) "->")
 
 -- Annoying As Fuck (tm).
 
@@ -618,7 +642,7 @@ newTypVar :: Kind -> TypeCheck (Typ Kind)
 newTypVar k = do
     (s, i) <- get
     put (s, i + 1)
-    return (TypVar (TypeVar k ("tvar_" ++ show i)))
+    return (TypVar (TypeVarT k ("tvar_" ++ show i)))
 
 -------------------------------------------------------------------------------
 
@@ -642,10 +666,10 @@ apply _ t = t
 -- and it will be useful for calculating substitutions to have a way
 -- to get the free `TyVar`s in a `Type`
 
-tv :: Typ Kind -> [TypeVar Kind]
-tv (TypVar u) = [u]
-tv (TypApp l r) = tv l `L.union` tv r
-tv t = []
+getVars :: Typ Kind -> [TypeVar Kind]
+getVars (TypVar u) = [u]
+getVars (TypApp l r) = getVars l `L.union` getVars r
+getVars t = []
 
 -------------------------------------------------------------------------------
 
@@ -687,12 +711,11 @@ mgu t u =
 -- that we are not constructing a replacement for a type into itself.
 
 varBind :: TypeVar Kind -> Typ Kind -> TypeCheck Subst
-
 varBind u t 
     | t == TypVar u      = return []
-    | u `elem` tv t    = uniErr "occurs check failed" t u  -- (2)
-    | kind u /= kind t = uniErr "kinds do not match"  t u  -- (1)
-    | otherwise        = return [(u, t)]            
+    | u `elem` getVars t = uniErr "occurs check failed" t u  -- (2)
+    | kind u /= kind t   = uniErr "kinds do not match"  t u  -- (1)
+    | otherwise          = return [(u, t)]            
 
 -------------------------------------------------------------------------------
 
@@ -723,7 +746,7 @@ data Scheme where
 quantify :: [TypeVar Kind] -> Typ Kind -> Scheme
 quantify vars typ = Forall kinds (apply subs typ)
     where
-        qVars = [ var | var <- tv typ, var `elem` vars ]
+        qVars = [ var | var <- getVars typ, var `elem` vars ]
         kinds = map kind qVars
         subs  = zip qVars (map TypGen [ 0 .. ])
 
@@ -789,7 +812,7 @@ pattCheck as (ValPatt (SymVal (Sym s))) = do
 
 -------------------------------------------------------------------------------
 
-pattCheck as (ValPatt (ConVal (TypSym (TypeSym () l)))) = do
+pattCheck as (ValPatt (ConVal (TypSym (TypeSymP l)))) = do
     sc <- find l as
     t  <- freshInst sc
     return ([], t)
@@ -800,7 +823,7 @@ pattCheck as (ValPatt (ConVal (TypSym (TypeSym () l)))) = do
 -- (abstraction) type of the arguments, and unify with the constructor's
 -- `Assump` from the environment.  
 
-pattCheck as (ConPatt (TypeSym () con) ps) = do
+pattCheck as (ConPatt (TypeSymP con) ps) = do
     sc <- find con as
     x  <- sequence (map (pattCheck as) ps)
     t' <- newTypVar Star
@@ -813,7 +836,7 @@ pattCheck as (ConPatt (TypeSym () con) ps) = do
 -- We need a way to get typing from the parsed 
 
 toAssump :: TypeSym () -> TypSch () -> [Assump]
-toAssump (TypeSym () name) (TypSch tvars typ) =
+toAssump (TypeSymP name) (TypSch tvars typ) =
 
     [ name :>: quantify (toVar <$> tvars) (toTyp typ Star) ]
 
@@ -821,10 +844,10 @@ toAssump (TypeSym () name) (TypSch tvars typ) =
  
 -- Kind inference
 
-        toVar (TypeVar () n) = TypeVar Star n
+        toVar (TypeVarP n) = TypeVarT Star n
 
-        toTyp (TypSym (TypeSym () n)) k = TypSym (TypeSym k n)
-        toTyp (TypVar (TypeVar () n)) k = TypVar (TypeVar k n)
+        toTyp (TypSym (TypeSymP n)) k = TypSym (TypeSymT k n)
+        toTyp (TypVar (TypeVarP n)) k = TypVar (TypeVarT k n)
         toTyp (TypApp f x) k =
             TypApp (toTyp f (Kfun Star k)) (toTyp x Star)
 
@@ -840,7 +863,7 @@ exprCheck as (VarExpr (LitVal l)) =
 exprCheck as (VarExpr (SymVal (Sym sym))) =
     find sym as >>= freshInst
 
-exprCheck as (VarExpr (ConVal (TypSym (TypeSym () sym)))) =
+exprCheck as (VarExpr (ConVal (TypSym (TypeSymP sym)))) =
     find sym as >>= freshInst
 
 -------------------------------------------------------------------------------
@@ -908,7 +931,7 @@ instance ToJExpr Val where
 
     toJExpr (SymVal s) = toJExpr s
     toJExpr (LitVal l) = toJExpr l
-    toJExpr (ConVal (TypSym (TypeSym () s))) = ref s
+    toJExpr (ConVal (TypSym (TypeSymP s))) = ref s
 
 instance ToJExpr Sym where
 
@@ -959,7 +982,7 @@ instance ToJExpr Expr where
 
 -- TODO I need to be curried like a mofo!
 
-    toJExpr (LetExpr (TypBind (TypeSym () sym) typsch) expr) = [jmacroE|
+    toJExpr (LetExpr (TypBind (TypeSymP sym) typsch) expr) = [jmacroE|
 
         function() {
             var scheme = function() {
@@ -1019,13 +1042,13 @@ instance ToJExpr Match where
 
     |]
 
-    toJExpr (Match val (ValPatt (ConVal (TypSym (TypeSym () s)))) scope) = [jmacroE|
+    toJExpr (Match val (ValPatt (ConVal (TypSym (TypeSymP s)))) scope) = [jmacroE|
 
         `(val)`.type == `(s)`
 
     |]
 
-    toJExpr (Match val (ConPatt (TypeSym () sym) ps) _) =
+    toJExpr (Match val (ConPatt (TypeSymP sym) ps) _) =
 
         [jmacroE| `(val)`.type == `(sym)` |]
 
