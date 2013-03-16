@@ -268,15 +268,24 @@ data Lit where
 
 -------------------------------------------------------------------------------
 
--- TODO describe the type signature AST
+-- TODO a few demonstation expressions w/ translations
+
+-------------------------------------------------------------------------------
+
+-- Oh, and one more thing ...
+
+-------------------------------------------------------------------------------
+
+-- We would like to use the same data structure for both declared and infered
+-- types, but we also want to present the talk incrementally - so 
 
 data Type a where
 
-    TypeSym :: TypeSym a -> Type a
-    TypeVar :: TypeVar a -> Type a
-    TypeApp :: Type a -> Type a -> Type a
+    TypeSym :: TypeSym a -> Type a         -- Int, String
+    TypeVar :: TypeVar a -> Type a         -- a, b
+    TypeApp :: Type a -> Type a -> Type a  -- m a, b -> c
 
-    TypeGen :: Int -> Type Kind
+    TypeGen :: Int -> Type Kind            -- forall a. a
 
 data TypeVar a where
 
@@ -334,9 +343,6 @@ type MyParser a = String -> Either Err (a, String)
 parseOhml :: String -> Either Err Expr
 parseOhml = left (Err . show) . parse grammar "Parsing OHML" 
 
-    where
-        grammar = spaces *> exprP <* eof
-
 -------------------------------------------------------------------------------
 
 -- TODO Explain combinators `*>` and `<*`
@@ -366,9 +372,22 @@ ohmlDef = emptyDef {
     T.identStart      = lower <|> char '_'
 }
 
--- Record wild card makes `TokenParser` easy on the eyes.
+-- Record wild card will bind locally all fields of the `TokenParser`, of
+-- which there are many (5).
 
 T.TokenParser { .. } = T.makeTokenParser ohmlDef
+
+-- (5) http://legacy.cs.uu.nl/daan/download/parsec/parsec.html#TokenParser
+
+-------------------------------------------------------------------------------
+
+grammar :: Parser Expr
+grammar = spaces *> exprP <* eof
+
+--       (spaces *> exprP) <* eof
+
+-- Applicative functor combinators are left associative - so is
+-- function application!
 
 -------------------------------------------------------------------------------
 
@@ -755,16 +774,16 @@ freshInst (TypeSchT ks qt) = do
 
 -- Assumptions
 
-data Assump = String :>: TypeSch Kind
+data Ass = String :>: TypeSch Kind
 
-prelude :: [Assump]
+prelude :: [Ass]
 prelude =
 
     [ "==" :>: TypeSchT [Star] (TypeGen 0 `fn` TypeGen 0 `fn` TypeGen 0)
     , "+"  :>: TypeSchT [] (tDouble `fn` tDouble `fn` tDouble)
     , "-"  :>: TypeSchT [] (tDouble `fn` tDouble `fn` tDouble) ]
 
-find :: String -> [Assump] -> TypeCheck (TypeSch Kind)
+find :: String -> [Ass] -> TypeCheck (TypeSch Kind)
 find i [] = typErr ("unbound identifier: " ++ i)
 find i ((i' :>: sc) : as) 
     | i == i'   = return sc
@@ -785,12 +804,12 @@ litCheck (NumLit _)  = tDouble
 
 -- Patterns are a bit more complicated.
 
-pattCheck :: [Assump] -> Patt -> TypeCheck ([Assump], Type Kind)
+pattCheck :: [Ass] -> Patt -> TypeCheck ([Ass], Type Kind)
 
-pattCheck as (ValPatt (LitVal l)) = do
+pattCheck as (ValPatt (LitVal l)) =
     return ([], litCheck l)
 
--- For starters, they can introduce bindings and hence `Assump`s.
+-- For starters, they can introduce bindings and hence `Ass`s.
 
 pattCheck as (ValPatt (SymVal (Sym s))) = do
     t <- newTypeVar Star
@@ -807,7 +826,7 @@ pattCheck as (ValPatt (ConVal (TypeSym (TypeSymP l)))) = do
 
 -- In order to check destruction patterns, we need to recreate the implied
 -- (abstraction) type of the arguments, and unify with the constructor's
--- `Assump` from the environment.  
+-- `Ass` from the environment.  
 
 pattCheck as (ConPatt (TypeSymP con) ps) = do
     sc <- find con as
@@ -821,8 +840,8 @@ pattCheck as (ConPatt (TypeSymP con) ps) = do
 
 -- We need a way to get typing from the parsed 
 
-toAssump :: TypeSym () -> TypeSch () -> [Assump]
-toAssump (TypeSymP name) (TypeSchP tvars typ) =
+toAss :: TypeSym () -> TypeSch () -> [Ass]
+toAss (TypeSymP name) (TypeSchP tvars typ) =
 
     [ name :>: quantify (toVar <$> tvars) (toType typ Star) ]
 
@@ -841,13 +860,13 @@ toAssump (TypeSymP name) (TypeSchP tvars typ) =
 
 -- Expressions
 
-exprCheck :: [Assump] -> Expr -> TypeCheck (Type Kind)
+exprCheck :: [Ass] -> Expr -> TypeCheck (Type Kind)
 
 exprCheck as (VarExpr (LitVal l)) =
     return (litCheck l)
 
 exprCheck as (LetExpr (TypBind typ typSch) expr) = do
-    exprCheck (toAssump typ typSch ++ as) expr
+    exprCheck (toAss typ typSch ++ as) expr
 
 -------------------------------------------------------------------------------
 
