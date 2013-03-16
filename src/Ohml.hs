@@ -988,11 +988,7 @@ instance ToJExpr Expr where
     toJExpr (LetExpr (TypBind (TypeSymP sym) typsch) expr) = [jmacroE|
 
         function() {
-            var scheme = function() {
-                this.attrs = arguments;
-                this.type  = `(sym)`;
-            };
-
+            var scheme = `(curriedFun sym typsch)`;
             `(intro sym (const scheme) expr)`()
         }()
 
@@ -1013,12 +1009,32 @@ instance ToJExpr Expr where
     toJExpr (MatExpr val []) = [jmacroE|
 
         (function() {
-            throw new Exception("Pattern Match Exhausted");
+            throw "Pattern Match Exhausted";
         })()
 
     |]
 
     toJExpr x = error (show x)
+
+curriedFun :: String -> TypeSch () -> JExpr
+
+curriedFun sym (TypeSchP vars (TypeApp (TypeApp (TypeSym (TypeSymP "->")) _) fs)) = [jmacroE|
+
+    function() {
+        return `(curriedFun sym (TypeSchP vars fs))`;
+    }
+
+|]
+
+curriedFun sym _ = [jmacroE| 
+
+    new function() {
+        this.attrs = arguments;
+        this.type  = `(sym)`;
+    }()
+|]
+    
+
 
 data Match = Match Expr Patt JExpr deriving (Show)
 
