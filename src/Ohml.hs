@@ -110,7 +110,7 @@ samplePrograms = [
     \       0 -> 0;                            \
     \       1 -> 1;                            \
     \       n -> fib (n - 1) + fib (n - 2);;   \
-    \   fib 1                                  ",
+    \   fib 7                                  ",
 
 -------------------------------------------------------------------------------
 
@@ -118,15 +118,15 @@ samplePrograms = [
 -- (TODO Address GADTs - they are allowed syntactically, but our inference
 -- algorithm will not check them correctly)
 
-    "   data Cons: forall a => a -> List a -> List a;    \
-    \   data Nil: forall a => List a;                    \
-    \                                                    \
-    \   let length = fun n ->                            \
-    \       match n with                                 \
-    \           Nil -> 0;                                \
-    \           (Cons _ xs) -> 1 + length xs;;           \
-    \                                                    \
-    \   length (Cons 1 (Cons 2 Nil)) == 2                " ]
+    "   data Cons: forall a => a -> List a -> List a;   \
+    \   data Nil: forall a => List a;                   \
+    \                                                   \
+    \   let length = fun n ->                           \
+    \       match n with                                \
+    \           Nil -> 0;                               \
+    \           (Cons _ xs) -> 1 + length xs;;          \
+    \                                                   \
+    \   length (Cons 1 (Cons 2 Nil))                    " ]
 
 -------------------------------------------------------------------------------
 
@@ -277,7 +277,9 @@ data Lit where
 -------------------------------------------------------------------------------
 
 -- We would like to use the same data structure for both declared and infered
--- types, but we also want to present the talk incrementally - so 
+-- types, but we also want to present the talk incrementally - so
+
+-- TODO finish this section please!
 
 data Type a where
 
@@ -723,7 +725,7 @@ mgu t u =
 
 varBind :: TypeVar Kind -> Type Kind -> TypeCheck Subst
 varBind u t 
-    | t == TypeVar u      = return []
+    | t == TypeVar u     = return []
     | u `elem` getVars t = uniErr "occurs check failed" t u  -- (2)
     | kind u /= kind t   = uniErr "kinds do not match"  t u  -- (1)
     | otherwise          = return [(u, t)]            
@@ -743,6 +745,21 @@ unify t1 t2 = do
 
 -- Generalization
 -- --------------
+
+-- Consider the program
+
+generalProg =
+
+    "   let f x = x;                      \
+    \   f 1 == f 1                        \
+    \       && f \"test\" == f \"test\"   "
+
+-- Without generalization step, the application of `f 1` will introduce the
+-- assumption `f : Num -> Num`, which makes the rest of the expression
+-- invalid.
+
+-- Generalization will guarantee that each application of `f` will have
+-- new type variables.
 
 -------------------------------------------------------------------------------
 
@@ -838,7 +855,7 @@ pattCheck as (ConPatt (TypeSymP con) ps) = do
 
 -------------------------------------------------------------------------------
 
--- We need a way to get typing from the parsed 
+-- We need a way to get `Ass`s from `TypeSch`s
 
 toAss :: TypeSym () -> TypeSch () -> [Ass]
 toAss (TypeSymP name) (TypeSchP tvars typ) =
@@ -847,7 +864,8 @@ toAss (TypeSymP name) (TypeSchP tvars typ) =
 
     where
  
--- Kind inference
+-- Kind inference needs to be performed here - luckily this can be 
+-- computed entirely from the AST's structure.
 
         toVar (TypeVarP n) = TypeVarT Star n
 
@@ -882,7 +900,7 @@ exprCheck as (VarExpr (ConVal (TypeSym (TypeSymP sym)))) =
 
 -------------------------------------------------------------------------------
 
--- TODO address let polymorphism
+-- TODO generalize me please!
 
 exprCheck as (LetExpr (SymBind (Sym sym) val) expr) = do
     symT <- newTypeVar Star
@@ -945,9 +963,30 @@ exprCheck as (MatExpr expr ((patt, res):es)) = do
 
 --     2. What you get for free by using JMacro/Javascript.
 
-generateJs = Right . toJExpr
+generateJs = Right . consoleLog . toJExpr
 
---   B. Marshalling the OHML AST into JExprs
+    where
+        consoleLog x = [jmacroE|
+
+            function() {
+                var y = `(x)`;
+                console.log(y);
+            }()
+
+        |]
+
+-------------------------------------------------------------------------------
+
+-- Marshalling the OHML AST into `JExpr`s
+
+instance ToJExpr Lit where
+
+    toJExpr (StrLit s)  = toJExpr s
+    toJExpr (NumLit n)  = toJExpr n
+
+instance ToJExpr Sym where
+
+    toJExpr (Sym x) = ref x
 
 instance ToJExpr Val where
 
@@ -955,14 +994,10 @@ instance ToJExpr Val where
     toJExpr (LitVal l) = toJExpr l
     toJExpr (ConVal (TypeSym (TypeSymP s))) = ref s
 
-instance ToJExpr Sym where
+ref :: String -> JExpr
+ref = ValExpr . JVar . StrI
 
-    toJExpr (Sym x) = ref x
-
-instance ToJExpr Lit where
-
-    toJExpr (StrLit s)  = toJExpr s
-    toJExpr (NumLit n)  = toJExpr n
+-------------------------------------------------------------------------------
 
 --   D. Hygenic introduction of variables
 
@@ -1002,13 +1037,11 @@ instance ToJExpr Expr where
 
     |]
 
--- TODO I need to be curried like a mofo!
-
     toJExpr (LetExpr (TypBind (TypeSymP sym) typsch) expr) = [jmacroE|
 
         function() {
             var scheme = `(curriedFun sym typsch)`;
-            `(intro sym (const scheme) expr)`()
+            return `(intro sym (const scheme) expr)`()
         }()
 
     |]
@@ -1017,7 +1050,8 @@ instance ToJExpr Expr where
 
         (function() {
             var scope = this;
-            if (`(Match val patt scope)`)
+            var vall = `(val)`;
+            if (`(Match vall patt scope)`)
                 return `(expr)`
             else
                 return `(MatExpr val cases)`;
@@ -1039,26 +1073,35 @@ curriedFun :: String -> TypeSch () -> JExpr
 
 curriedFun sym (TypeSchP vars (TypeApp (TypeApp (TypeSym (TypeSymP "->")) _) fs)) = [jmacroE|
 
-    function() {
-        return `(curriedFun sym (TypeSchP vars fs))`;
+    function(x) {
+        var args = [];
+        `(args)`.push(x); 
+        return `(curriedFun' sym args (TypeSchP vars fs))`;
     }
 
 |]
 
-curriedFun sym _ = [jmacroE| 
+curriedFun sym ts = curriedFun' sym "" ts
+
+curriedFun' sym args (TypeSchP vars (TypeApp (TypeApp (TypeSym (TypeSymP "->")) _) fs)) = [jmacroE|
+
+    function(x) {
+        `(args)`.push(x); 
+        return `(curriedFun' sym args (TypeSchP vars fs))`;
+    }
+
+|]
+
+curriedFun' sym args _ = [jmacroE| 
 
     new function() {
-        this.attrs = arguments;
+        this.attrs = `(args)`;
         this.type  = `(sym)`;
     }()
+
 |]
-    
 
-
-data Match = Match Expr Patt JExpr deriving (Show)
-
-ref :: String -> JExpr
-ref = ValExpr . JVar . StrI
+data Match = Match JExpr Patt JExpr deriving (Show)
 
 isInline :: Expr -> Maybe (Expr, String, Expr)
 isInline (AppExpr (AppExpr (VarExpr (SymVal (Sym o))) x) y) 
@@ -1084,11 +1127,27 @@ instance ToJExpr Match where
 
         [jmacroE| `(val)`.type == `(s)` |]
 
-    toJExpr (Match val (ConPatt (TypeSymP sym) ps) _) =
+    toJExpr (Match val (ConPatt (TypeSymP sym) ps) scope) =
 
-        [jmacroE| `(val)`.type == `(sym)` |]
+        [jmacroE| `(val)`.type == `(sym)` && (function() {
+
+                // going to need to zip with each arg
+                var result = true;
+                for (var arg in `(val)`.attrs) {
+                    var argg = `(val)`.attrs[arg];
+                    result = result && `(conds argg ps scope)`;
+                }
+                return result;
+            })() |]
 
     toJExpr x = error (show x)
+
+conds _ [] _ = [jmacroE| true |]
+conds val (x : xs) scope = [jmacroE|
+
+    `(Match val x scope)` && `(conds val xs scope)`
+
+|]
 
 -- UTILS
 
