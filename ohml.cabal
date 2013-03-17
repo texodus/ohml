@@ -19,4 +19,5 @@ executable ohml
     mtl >= 2.1 && <= 2.2,
     jmacro >= 0.6.3 && <0.7,
     containers >= 0.4 && < 0.5,
+    process == 1.1.0.1,
     directory

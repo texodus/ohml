@@ -24,7 +24,7 @@
 --         (  /  )
 --          \(__)|
 
--- I. ------------------------------------------------------------------------
+------------------------------------------------------------------------------
 
 -- Why?
 
@@ -56,6 +56,15 @@ import Control.Applicative
 import Control.Monad
 import Control.Monad.State
 import Control.Arrow
+
+
+import Control.Concurrent
+
+import System.Exit
+import System.IO
+import System.Process
+import System.Directory
+
 
 import qualified Data.List as L
 
@@ -159,7 +168,7 @@ brokenSamples = [
     \   let x = 2;                \
     \   f 3 == 6                  " ]
 
--- I.C. -----------------------------------------------------------------------
+------------------------------------------------------------------------------
 
 -- Compiler Architecture
 
@@ -174,7 +183,7 @@ compile = parseOhml >=> typeCheck >=> generateJs >=> toText
 newtype Err = Err String deriving Show
 
 
--- II. --------------------------------------------------------------------
+------------------------------------------------------------------------------
 
 -- The Abstract Syntax Tree, or AST in the 'biz.
 
@@ -253,17 +262,14 @@ data Lit where
 -- phase - `()` for parsing, `Kind` for type checking
 
 data TypeVar a where
-
     TypeVarP :: String -> TypeVar ()
     TypeVarT :: Kind -> String -> TypeVar Kind
 
 data TypeSym a where 
-
     TypeSymP :: String -> TypeSym ()
     TypeSymT :: Kind -> String -> TypeSym Kind
 
 data TypeSch a where
-
     TypeSchP :: [TypeVar ()] -> Type () -> TypeSch ()
     TypeSchT :: [Kind] -> Type Kind -> TypeSch Kind
 
@@ -286,7 +292,7 @@ data Type a where
 
 -- TODO a few demonstation expressions w/ translations.
 
--- III. -----------------------------------------------------------------------
+------------------------------------------------------------------------------
 
 -- Parsing With Prejudice 
 
@@ -459,24 +465,16 @@ exprP =
 ------------------------------------------------------------------------------
 
         letExprP =
-            pure LetExpr
-                <*  reserved "let" 
-                <*> symP
-                <*  reservedOp "="
-                <*> exprP
-                <*  semi
-                <*> exprP
-                <?> "Let Expression"
+            pure LetExpr  <*  reserved "let" 
+                <*> symP  <*  reservedOp "="
+                <*> exprP <*  semi
+                <*> exprP <?> "Let Expression"
 
         typExprP =
-            pure TypExpr
-                <*  reserved "data"
-                <*> typSymP
-                <*  reserved ":"
-                <*> typSchP
-                <*  semi
-                <*> exprP
-                <?> "Type Kind Expression"
+            pure TypExpr    <*  reserved "data"
+                <*> typSymP <*  reserved ":"
+                <*> typSchP <*  semi
+                <*> exprP   <?> "Type Kind Expression"
 
 ------------------------------------------------------------------------------
 
@@ -541,7 +539,10 @@ typSchP =
 
 ------------------------------------------------------------------------------
 
--- Overview of the algorithm.
+-- We're going to borrow the approach taken in "Typing Haskell in 
+-- Haskell" (1).  The type of a OHML program will be computed in via
+-- the `StateT` monad transformer, which will hide our substitution
+-- environment and unique type variable generator.
 
 type TypeCheck a = StateT (Subst, Int) (Either Err) a
 
@@ -553,24 +554,12 @@ typeCheck =
          &&& flip runStateT ([], 0)
          . exprCheck prelude
 
-------------------------------------------------------------------------------
-
--- There are lots of errors that can happen when inferring types.
-
-typErr ::  String -> TypeCheck a
-typErr = lift . Left . Err
-
-uniErr :: (HasKind t, Show t, HasKind u, Show u) => 
-          String -> t -> u -> TypeCheck a
-
-uniErr msg t u = typErr $
-    msg ++ "\n  "
-        ++ show u ++ " (" ++ show (kind u) ++ ") and " 
-        ++ show t ++ " (" ++ show (kind t) ++ ")"
+-- (1) http://web.cecs.pdx.edu/~mpj/thih/
 
 ------------------------------------------------------------------------------
 
--- There are some new vocab words.
+-- There are some new vocab words, which we saw earlier in our definitions
+-- of `Type a`. `Kind` is basically a type of types.
 
 data Kind where
 
@@ -607,6 +596,18 @@ instance HasKind (TypeSym Kind) where
 
 ------------------------------------------------------------------------------
 
+-- Kind inference is quite simple - given the Kind we expect of a symbol, we
+-- extrapolate the Kinds of it's constituent parts through structural
+-- inspection.
+
+toKind :: Type () -> Kind -> Type Kind
+toKind (TypeSym (TypeSymP n)) k = TypeSym (TypeSymT k n)
+toKind (TypeVar (TypeVarP n)) k = TypeVar (TypeVarT k n)
+toKind (TypeApp f x) k =
+    TypeApp (toKind f (Kfun Star k)) (toKind x Star)
+
+------------------------------------------------------------------------------
+
 -- Some familiar types defined in out new vocabulary.  Tidy!
 
 tString  = TypeSym (TypeSymT Star "String" )
@@ -618,7 +619,7 @@ tArrow   = TypeSym (TypeSymT (Kfun Star (Kfun Star Star)) "->")
 infixr 4 `fn`
 
 fn :: Type Kind -> Type Kind -> Type Kind
-fn a b = TypeApp (TypeApp tArrow a) b
+fn = TypeApp . TypeApp tArrow
 
 ------------------------------------------------------------------------------
 
@@ -644,7 +645,6 @@ type Subst = [(TypeVar Kind, Type Kind)]
 -- Substitutions can be applied to types
 
 class Substitute a where
-
     apply :: Subst -> a -> a
     getVars :: a -> [TypeVar Kind]
 
@@ -660,6 +660,8 @@ instance Substitute (Type Kind) where
     getVars (TypeVar u) = [u]
     getVars (TypeApp l r) = getVars l `L.union` getVars r
     getVars t = []
+
+------------------------------------------------------------------------------
 
 instance Substitute a => Substitute [a] where
     apply s = map (apply s)
@@ -694,17 +696,12 @@ mgu (TypeApp f x) (TypeApp g y) = do
     sub2 <- apply sub1 x `mgu` apply sub1 y
     return (sub2 `ext` sub1)                           
                                
-mgu (TypeVar u) t =
-    u `varBind` t
+mgu (TypeVar u) t = u `varBind` t
+mgu t (TypeVar u) = u `varBind` t
 
-mgu t (TypeVar u) =
-    u `varBind` t
+mgu (TypeSym t) (TypeSym u) | t == u = return []
 
-mgu (TypeSym t) (TypeSym u) | t == u =
-    return []
-
-mgu t u =
-    uniErr "types do not unify" t u
+mgu t u = uniErr "types do not unify" t u
 
 ------------------------------------------------------------------------------
 
@@ -737,7 +734,7 @@ unify t1 t2 = do
 
 -- Consider the program
 
-generalProg =
+test_generalization = ohml
 
     "   let f = fun x -> x;               \
     \   f 1 == f 1                        \
@@ -748,7 +745,8 @@ generalProg =
 -- invalid.
 
 -- Generalization will guarantee that each application of `f` will have
--- new type variables.
+-- new type variables, by replacing the type variable representing `x` with
+-- a fresh var at every invocation.
 
 ------------------------------------------------------------------------------
 
@@ -860,36 +858,12 @@ pattCheck as (ConPatt (TypeSymP con) ps) = do
 
 ------------------------------------------------------------------------------
 
--- We need a way to get `Ass`s from `TypeSch ()`s
-
-toAss :: TypeSym () -> TypeSch () -> [Ass]
-toAss (TypeSymP name) (TypeSchP tvars typ) =
-
-    [ name :>: quantify (toVar <$> tvars) (toType typ Star) ]
-
-    where
- 
--- Kind inference needs to be performed here - luckily this can be 
--- computed entirely from the AST's structure.
-
-        toVar (TypeVarP n) = TypeVarT Star n
-
-        toType (TypeSym (TypeSymP n)) k = TypeSym (TypeSymT k n)
-        toType (TypeVar (TypeVarP n)) k = TypeVar (TypeVarT k n)
-        toType (TypeApp f x) k =
-            TypeApp (toType f (Kfun Star k)) (toType x Star)
-
-------------------------------------------------------------------------------
-
 -- Expressions
 
 exprCheck :: [Ass] -> Expr -> TypeCheck (Type Kind)
 
 exprCheck as (VarExpr (LitVal l)) =
     return (litCheck l)
-
-exprCheck as (TypExpr typ typSch expr) = do
-    exprCheck (toAss typ typSch ++ as) expr
 
 ------------------------------------------------------------------------------
 
@@ -905,7 +879,7 @@ exprCheck as (VarExpr (ConVal (TypeSym (TypeSymP sym)))) =
 
 ------------------------------------------------------------------------------
 
--- TODO generalize me please!
+-- This is the `let` generalization alluded to previously.
 
 exprCheck as (LetExpr (Sym sym) val expr) = do
     symT <- newTypeVar Star
@@ -959,7 +933,17 @@ exprCheck as (MatExpr expr ((patt, res):es)) = do
     unify resT esT
     return resT
 
--- IV. ------------------------------------------------------------------------
+------------------------------------------------------------------------------
+
+exprCheck as (TypExpr (TypeSymP name) typSch expr) = do
+    exprCheck (name :>: toKSch typSch : as) expr
+
+    where
+        toVar (TypeVarP n) = TypeVarT Star n
+        toKSch (TypeSchP tvars typ) =
+            quantify (toVar <$> tvars) (toKind typ Star)
+
+------------------------------------------------------------------------------
 
 -- Code Generation
 -- ===============
@@ -1003,18 +987,16 @@ generateJs = Right . consoleLog . toJExpr  -- (1)
 
     where
         consoleLog x = [jmacroE|           // (2)
-
             function() {                   // (3)
                 var y = `(x)`;             // (4)
                 console.log(y);
             }()
-
         |]                                 -- (5) 
 
 -- (1) toJExpr, and the `ToJExpr a` class
 -- (2) quasiquotation - wait what just happened?
--- (3) HOLY SHIT WE'RE INSIDE JAVASCRIPT!
--- (4) HOLY SHIT WE JUST REFERENCED A HASKELL VALUE FROM INSIDE JAVASCRIPT!
+-- (3) HOLY **** WE'RE INSIDE JAVASCRIPT!
+-- (4) HOLY **** WE JUST REFERENCED A HASKELL VALUE FROM INSIDE JAVASCRIPT!
 -- (5) Ok, that was weird ...
 
 ------------------------------------------------------------------------------
@@ -1023,19 +1005,18 @@ generateJs = Right . consoleLog . toJExpr  -- (1)
 -- on instances of `ToJExpr` for our AST.
 
 instance ToJExpr Lit where
-
     toJExpr (StrLit s)  = toJExpr s
     toJExpr (NumLit n)  = toJExpr n
 
 instance ToJExpr Sym where
-
     toJExpr (Sym x) = ref x
 
 instance ToJExpr Val where
-
     toJExpr (SymVal s) = toJExpr s
     toJExpr (LitVal l) = toJExpr l
     toJExpr (ConVal (TypeSym (TypeSymP s))) = ref s
+
+------------------------------------------------------------------------------
 
 -- ... but the quasiquoter interface does not allow runtime variable names,
 -- so for this and some other tasks we must construct the JExpr manually.
@@ -1051,13 +1032,11 @@ ref = ValExpr . JVar . StrI
 
 intro :: (ToJExpr a) => String -> (JExpr -> a) -> Expr -> JExpr
 intro sym f expr = [jmacroE| 
-
     function(arg) {                              // (1)
         `(DeclStat (StrI sym) Nothing)`;
         `(ref sym)` = `(f arg)`;                 // (2)
         return `(expr)`;
     }
-
 |]
 
 -- (1) `arg` is created in javascript ...
@@ -1077,7 +1056,7 @@ instance ToJExpr Expr where
 
         intro sym id ex
 
-    toJExpr (isInline -> Just (x, o, y)) =
+    toJExpr (isInfix -> Just (x, o, y)) =
 
         InfixExpr o (toJExpr x) (toJExpr y)
 
@@ -1118,11 +1097,7 @@ instance ToJExpr Expr where
     |]
 
     toJExpr (MatExpr val []) = [jmacroE|
-
-        (function() {
-            throw "Pattern Match Exhausted";
-        })()
-
+        (function() { throw "Pattern Match Exhausted"; })()
     |]
 
 
@@ -1130,7 +1105,7 @@ instance ToJExpr Expr where
 
 curriedFun :: String -> TypeSch () -> JExpr
 
-curriedFun sym (TypeSchP vars (TypeApp (TypeApp (TypeSym (TypeSymP "->")) _) fs)) = [jmacroE|
+curriedFun sym (TypeSchP vars (isFun -> Just (_, fs))) = [jmacroE|
 
     function(x) {
         var args = [];
@@ -1144,7 +1119,7 @@ curriedFun sym ts = curriedFun' sym "" ts
 
 ------------------------------------------------------------------------------
 
-curriedFun' sym args (TypeSchP vars (TypeApp (TypeApp (TypeSym (TypeSymP "->")) _) fs)) = [jmacroE|
+curriedFun' sym args (TypeSchP vars (isFun -> Just (_, fs))) = [jmacroE|
 
     function(x) {
         `(args)`.push(x); 
@@ -1190,26 +1165,26 @@ instance ToJExpr Match where
     toJExpr (Match val (ConPatt (TypeSymP sym) ps) scope) = [jmacroE|
 
         `(val)`.type == `(sym)` && (function() {
-
             var result = true;
-
             for (var arg in `(val)`.attrs) {
                 var argg = `(val)`.attrs[arg];
                 result = result && `(conds argg ps scope)`;
             }
-
             return result;
-
         })()
 
-    |] where
+    |]
 
-        conds _ [] _ = [jmacroE| true |]
-        conds val (x : xs) scope = [jmacroE|
+------------------------------------------------------------------------------
 
-            `(Match val x scope)` && `(conds val xs scope)`
+conds :: JExpr -> [Patt] -> JExpr -> JExpr
 
-        |]
+conds _ [] _ = [jmacroE| true |]
+conds val (x : xs) scope = [jmacroE|
+
+    `(Match val x scope)` && `(conds val xs scope)`
+
+|]
 
 ------------------------------------------------------------------------------
 
@@ -1221,19 +1196,44 @@ instance ToJExpr Match where
 
 ------------------------------------------------------------------------------
 
-
 -- UTILS
+
+------------------------------------------------------------------------------
+
+-- Main
 
 toText :: JExpr  -> Either Err String
 toText = Right . show . renderJs  
 
+unwrap :: (Show a) => Either a String -> IO ()
 unwrap (Right x) = putStrLn x        >> putStrLn "----------------------"
 unwrap (Left x)  = putStrLn (show x) >> putStrLn "----------------------"
 
-isInline :: Expr -> Maybe (Expr, String, Expr)
-isInline (AppExpr (AppExpr (VarExpr (SymVal (Sym o))) x) y) 
+main :: IO ()
+main = do
+
+    file   <- head <$> getArgs
+    source <- readFile file
+    case compile source of
+        Left  e  -> print e
+        Right js -> putStrLn js
+
+------------------------------------------------------------------------------
+
+-- Views
+
+isInfix :: Expr -> Maybe (Expr, String, Expr)
+isInfix (AppExpr (AppExpr (VarExpr (SymVal (Sym o))) x) y) 
     | o `elem` concat ops  = Just (x, o, y)
-isInline _ = Nothing
+isInfix _ = Nothing
+
+isFun :: Type t -> Maybe (Type (), Type ())
+isFun (TypeApp (TypeApp (TypeSym (TypeSymP "->")) x) y) = Just (x, y)
+isFun _ = Nothing
+
+------------------------------------------------------------------------------
+
+-- GADT deriving
 
 deriving instance (Show a) => Show (Type a)  
 deriving instance (Show a) => Show (TypeVar a)  
@@ -1245,20 +1245,81 @@ deriving instance (Eq a) => Eq (TypeVar a)
 deriving instance (Eq a) => Eq (TypeSym a)  
 deriving instance (Eq a) => Eq (TypeSch a)
 
-main :: IO ()
-main = do
+------------------------------------------------------------------------------
 
-    source <- head <$> getArgs
-    case compile source of
-        Left  e  -> print e
-        Right js -> putStrLn js
+-- Type errors
 
+typErr ::  String -> TypeCheck a
+typErr = lift . Left . Err
 
+uniErr :: (HasKind t, Show t, HasKind u, Show u) => 
+          String -> t -> u -> TypeCheck a
 
+uniErr msg t u = typErr $
+    msg ++ "\n  "
+        ++ show u ++ " (" ++ show (kind u) ++ ") and " 
+        ++ show t ++ " (" ++ show (kind t) ++ ")"
 
--- V. Wrap up, run the samples from the intro.
+------------------------------------------------------------------------------
+
+-- Node Tests
+
+node :: String -> IO ()
+node js = do
+
+    (Just std_in, Just std_out, _, p) <-
+        createProcess (proc "node" []) { std_in = CreatePipe, std_out = CreatePipe }
+
+    forkIO $ do 
+        errors <- hGetContents std_out
+        putStr errors
+        hFlush stdout         
+
+    hPutStrLn std_in $ js ++ "\n\n"
+
+    z <- waitForProcess p
+    
+    return ()
+
+ohml :: String -> IO ()
+ohml x = case compile x of
+    Right x -> node x
+    Left y -> putStrLn (show y)
+
+------------------------------------------------------------------------------
+
+-- Slide maker
+
+format :: IO ()
+format = do
+    text <- readFile "src/Ohml.hs"
+    let slides = concat $ map replace $ zip [1 ..] $ map pad $ L.groupBy isSlide (lines text)
+    putStrLn $ show $ length $ L.groupBy isSlide (lines text)
+    writeFile "slides.hs" (unlines slides)
+
+------------------------------------------------------------------------------
+
+    where 
+        isSlide _ "------------------------------------------------------------------------------" = False
+        isSlide _ _ = True
+
+        replace (i, (_:xs)) = (take 72 (repeat ' ') ++ "-- " ++ show i) : map unline xs
+
+        unline "------------------------------------------------------------------------------" = ""
+        unline x = x
+
+        pad xs | length xs < 28 =
+            if (28 - length xs) `mod` 2 == 0
+            then let sep = take ((28 - length xs) `quot` 2) (repeat "") in sep ++ xs ++ sep
+            else let sep = take ((28 - length xs) `quot` 2) (repeat "") in (sep ++ [""]) ++ xs ++ sep
+        pad xs = error $ unlines xs
+
+------------------------------------------------------------------------------
+
 
 -- LICENSE
+-- =======
+
 -- Copyright (c) 2013 Andrew Stein
 
 -- Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
