@@ -5,7 +5,7 @@
 
 -------------------------------------------------------------------------------
 
--- (1) [Write Yourself a (TypeSch Kind) in 48hrs]
+-- (1) [Write Yourself a Scheme in 48hrs]
 --     (http://en.wikibooks.org/wiki/Write_Yourself_a_Scheme_in_48_Hours),
 
 -- (2) [Parsec]
@@ -19,11 +19,11 @@
 
 -------------------------------------------------------------------------------
 
---              Use Forml, or I'll claw up your furniture!
---       /\   / 
---   )  ( ')  
---  (  /  )
---   \(__)|
+--                     Learn Forml, or I'll claw up your furniture!
+--              /\   / 
+--          )  ( ')  
+--         (  /  )
+--          \(__)|
 
 -- I. -------------------------------------------------------------------------
 
@@ -166,23 +166,6 @@ brokenSamples = [
 
 -------------------------------------------------------------------------------
 
--- Compiler "Architecture"
-
--------------------------------------------------------------------------------
-
--- The compiler will be a simple program that takes a file name, and
--- emits Javascript to stdout.
-
-main :: IO ()
-main = do
-
-    source <- head <$> getArgs
-    case compile source of
-        Left  e  -> print e
-        Right js -> putStrLn js
-
--------------------------------------------------------------------------------
-
 -- The structure of compilation can be expressed as a simple
 -- function composition.  
 
@@ -279,16 +262,6 @@ data Lit where
 -- We would like to use the same data structure for both declared and infered
 -- types, but we also want to present the talk incrementally - so
 
--- TODO finish this section please!
-
-data Type a where
-
-    TypeSym :: TypeSym a -> Type a         -- Int, String
-    TypeVar :: TypeVar a -> Type a         -- a, b
-    TypeApp :: Type a -> Type a -> Type a  -- m a, b -> c
-
-    TypeGen :: Int -> Type Kind            -- forall a. a
-
 data TypeVar a where
 
     TypeVarP :: String -> TypeVar ()
@@ -304,15 +277,16 @@ data TypeSch a where
     TypeSchP :: [TypeVar ()] -> Type () -> TypeSch ()
     TypeSchT :: [Kind] -> Type Kind -> TypeSch Kind
 
-deriving instance (Show a) => Show (Type a)  
-deriving instance (Show a) => Show (TypeVar a)  
-deriving instance (Show a) => Show (TypeSym a)  
-deriving instance (Show a) => Show (TypeSch a)  
 
-deriving instance (Eq a) => Eq (Type a)  
-deriving instance (Eq a) => Eq (TypeVar a)  
-deriving instance (Eq a) => Eq (TypeSym a)  
-deriving instance (Eq a) => Eq (TypeSch a)  
+-- TODO finish this section please!
+
+data Type a where
+
+    TypeSym :: TypeSym a -> Type a         -- Int, String
+    TypeVar :: TypeVar a -> Type a         -- a, b
+    TypeApp :: Type a -> Type a -> Type a  -- m a, b -> c
+
+    TypeGen :: Int -> Type Kind            -- forall a. a
 
 -- III. -----------------------------------------------------------------------
 
@@ -670,19 +644,35 @@ type Subst = [(TypeVar Kind, Type Kind)]
 
 -- Substitutions can be applied to types
 
-apply :: Subst -> Type Kind -> Type Kind
-apply s (TypeVar (flip lookup s -> Just u)) = u
-apply _ (TypeVar u) = TypeVar u
-apply s (TypeApp l r) = TypeApp (apply s l) (apply s r)
-apply _ t = t
+class Substitute a where
 
+    apply :: Subst -> a -> a
+    getVars :: a -> [TypeVar Kind]
+
+instance Substitute (Type Kind) where
+    apply s (TypeVar (flip lookup s -> Just u)) = u
+    apply _ (TypeVar u) = TypeVar u
+    apply s (TypeApp l r) = TypeApp (apply s l) (apply s r)
+    apply _ t = t
+    
 -- and it will be useful for calculating substitutions to have a way
 -- to get the free `TyVar`s in a `Type`
+    
+    getVars (TypeVar u) = [u]
+    getVars (TypeApp l r) = getVars l `L.union` getVars r
+    getVars t = []
 
-getVars :: Type Kind -> [TypeVar Kind]
-getVars (TypeVar u) = [u]
-getVars (TypeApp l r) = getVars l `L.union` getVars r
-getVars t = []
+instance Substitute a => Substitute [a] where
+    apply s = map (apply s)
+    getVars = L.nub . concat . map getVars
+
+instance Substitute Ass where
+    apply s (i :>: sc) = i :>: (apply s sc)
+    getVars (i :>: sc) = getVars sc
+
+instance Substitute (TypeSch Kind) where
+    apply s (TypeSchT ks qt) = TypeSchT ks (apply s qt)
+    getVars (TypeSchT ks qt) = getVars qt
 
 -------------------------------------------------------------------------------
 
@@ -750,7 +740,7 @@ unify t1 t2 = do
 
 generalProg =
 
-    "   let f x = x;                      \
+    "   let f = fun x -> x;               \
     \   f 1 == f 1                        \
     \       && f \"test\" == f \"test\"   "
 
@@ -771,6 +761,21 @@ quantify vars typ = TypeSchT kinds (apply subs typ)
         qVars = [ var | var <- getVars typ, var `elem` vars ]
         kinds = map kind qVars
         subs  = zip qVars (map TypeGen [ 0 .. ])
+
+-------------------------------------------------------------------------------
+
+-- With these tools, we can construct an environment aware `generalize`, which
+-- applies the current substitution and only generalizes the free `TypeVar`s
+-- in `valT`.
+
+generalize :: [Ass] -> Type Kind -> TypeCheck (TypeSch Kind)
+generalize as valT = do
+
+    subs <- fst <$> get 
+    return (quantify (getS subs valT L.\\ getS subs as) (apply subs valT))
+
+    where
+        getS x = (getVars .) . apply $ x
 
 -------------------------------------------------------------------------------
 
@@ -796,7 +801,8 @@ data Ass = String :>: TypeSch Kind
 prelude :: [Ass]
 prelude =
 
-    [ "==" :>: TypeSchT [Star] (TypeGen 0 `fn` TypeGen 0 `fn` TypeGen 0)
+    [ "==" :>: TypeSchT [Star] (TypeGen 0 `fn` TypeGen 0 `fn` tBool)
+    , "&&" :>: TypeSchT [] (tBool `fn` tBool `fn` tBool)
     , "+"  :>: TypeSchT [] (tDouble `fn` tDouble `fn` tDouble)
     , "-"  :>: TypeSchT [] (tDouble `fn` tDouble `fn` tDouble) ]
 
@@ -855,7 +861,7 @@ pattCheck as (ConPatt (TypeSymP con) ps) = do
 
 -------------------------------------------------------------------------------
 
--- We need a way to get `Ass`s from `TypeSch`s
+-- We need a way to get `Ass`s from `TypeSch ()`s
 
 toAss :: TypeSym () -> TypeSch () -> [Ass]
 toAss (TypeSymP name) (TypeSchP tvars typ) =
@@ -906,7 +912,8 @@ exprCheck as (LetExpr (SymBind (Sym sym) val) expr) = do
     symT <- newTypeVar Star
     valT <- exprCheck ((sym :>: TypeSchT [] symT) : as) val
     unify valT symT
-    exprCheck ((sym :>: TypeSchT [] symT) : as) expr
+    schT <- generalize as valT 
+    exprCheck (sym :>: schT : as) expr 
 
 --  Γ ⊦ eₒ : σ   Γ, x : σ ⊦ e₁ : τ
 --  ------------------------------
@@ -953,31 +960,68 @@ exprCheck as (MatExpr expr ((patt, res):es)) = do
     unify resT esT
     return resT
 
+-- IV. ------------------------------------------------------------------------
+
+-- Code Generation
+-- ===============
+
+-- The Noisy Killer.
+
 -------------------------------------------------------------------------------
 
--- IV. Code Generation (25 minutes)
+-- Q: What is JMacro?
 
---   A. Introduction to JMacro
+-- A: JMacro is a library for the programmatic generation of Javascript code.
+--    It is designed to be multipurpose -- it is useful whether you are 
+--    writing nearly vanilla Javascript or you are programmatically generating
+--    Javascript either in an ad-hoc fashion or as the backend to a compiler
+--    or EDSL. (1)
 
---     1. Features overview, quasiquotation
+-- Sounds useful, if only we were in teh midst of writing a Javascript
+-- compiler backend ...
 
---     2. What you get for free by using JMacro/Javascript.
+-- (1) http://www.haskell.org/haskellwiki/Jmacro
 
-generateJs = Right . consoleLog . toJExpr
+-------------------------------------------------------------------------------
+
+-- Features we can use without trying:
+
+-- * Javascript AST and renderer.
+
+--       TODO example
+
+-- * Quasiquoted interface which also provides some new syntax, like
+--   destructive bindings, optional haskell style syntax sugar.
+
+-- * Hygienic names - this let's us declare new vars without 
+--   knowledge of the environment.
+
+-------------------------------------------------------------------------------
+
+-- There's alot going on here that's new: 
+
+generateJs = Right . consoleLog . toJExpr  -- (1)
 
     where
-        consoleLog x = [jmacroE|
+        consoleLog x = [jmacroE|           // (2)
 
-            function() {
-                var y = `(x)`;
+            function() {                   // (3)
+                var y = `(x)`;             // (4)
                 console.log(y);
             }()
 
-        |]
+        |]                                 -- (5) 
+
+-- (1) toJExpr, and the `ToJExpr a` class
+-- (2) quasiquotation - wait what just happened?
+-- (3) HOLY SHIT WE'RE INSIDE JAVASCRIPT!
+-- (4) HOLY SHIT WE JUST REFERENCED A HASKELL VALUE FROM INSIDE JAVASCRIPT!
+-- (5) Ok, that was weird ...
 
 -------------------------------------------------------------------------------
 
--- Marshalling the OHML AST into `JExpr`s
+-- Marshalling the OHML AST into `JExpr`s - the strategy is to rely
+-- on instances of `ToJExpr` for our AST.
 
 instance ToJExpr Lit where
 
@@ -994,26 +1038,45 @@ instance ToJExpr Val where
     toJExpr (LitVal l) = toJExpr l
     toJExpr (ConVal (TypeSym (TypeSymP s))) = ref s
 
+-- ... but the quasiquoter interface does not allow runtime variable names,
+-- so for this and some other tasks we must construct the JExpr manually.
+
 ref :: String -> JExpr
 ref = ValExpr . JVar . StrI
 
 -------------------------------------------------------------------------------
 
---   D. Hygenic introduction of variables
+-- This enables us also to do one of the only manual processes neseccary -
+-- at some point we'll need to introduce new variables into scope,
+-- with a specific name and value.
 
 intro :: (ToJExpr a) => String -> (JExpr -> a) -> Expr -> JExpr
 intro sym f expr = [jmacroE| 
 
-    function(arg) {
+    function(arg) {                              // (1)
         `(DeclStat (StrI sym) Nothing)`;
-        `(ref sym)` = `(f arg)`;
+        `(ref sym)` = `(f arg)`;                 // (2)
         return `(expr)`;
     }
 
 |]
 
+-- (1) `arg` is created in javascript ...
+-- (2) ... but we can use it as an argument from Haskell?
+
+-- GO HOME HASKELL, YOU'RE DRUNK
+
+-------------------------------------------------------------------------------
 
 instance ToJExpr Expr where
+
+    toJExpr (VarExpr v) =
+
+        toJExpr v
+
+    toJExpr (AbsExpr (Sym sym) ex) = 
+
+        intro sym id ex
 
     toJExpr (isInline -> Just (x, o, y)) =
 
@@ -1023,13 +1086,7 @@ instance ToJExpr Expr where
 
         [jmacroE| `(f)`(`(x)`) |]
 
-    toJExpr (AbsExpr (Sym sym) ex) = 
-
-        intro sym id ex
-
-    toJExpr (VarExpr v) =
-
-        toJExpr v
+-------------------------------------------------------------------------------
 
     toJExpr (LetExpr (SymBind (Sym sym) ex) expr) = [jmacroE| 
 
@@ -1045,6 +1102,8 @@ instance ToJExpr Expr where
         }()
 
     |]
+
+-------------------------------------------------------------------------------
 
     toJExpr (MatExpr val ((patt, expr):cases)) = [jmacroE|
 
@@ -1067,7 +1126,15 @@ instance ToJExpr Expr where
 
     |]
 
-    toJExpr x = error (show x)
+
+-------------------------------------------------------------------------------
+
+isInline :: Expr -> Maybe (Expr, String, Expr)
+isInline (AppExpr (AppExpr (VarExpr (SymVal (Sym o))) x) y) 
+    | o `elem` concat ops  = Just (x, o, y)
+isInline _ = Nothing
+
+-------------------------------------------------------------------------------
 
 curriedFun :: String -> TypeSch () -> JExpr
 
@@ -1082,6 +1149,8 @@ curriedFun sym (TypeSchP vars (TypeApp (TypeApp (TypeSym (TypeSymP "->")) _) fs)
 |]
 
 curriedFun sym ts = curriedFun' sym "" ts
+
+-------------------------------------------------------------------------------
 
 curriedFun' sym args (TypeSchP vars (TypeApp (TypeApp (TypeSym (TypeSymP "->")) _) fs)) = [jmacroE|
 
@@ -1101,12 +1170,9 @@ curriedFun' sym args _ = [jmacroE|
 
 |]
 
-data Match = Match JExpr Patt JExpr deriving (Show)
+-------------------------------------------------------------------------------
 
-isInline :: Expr -> Maybe (Expr, String, Expr)
-isInline (AppExpr (AppExpr (VarExpr (SymVal (Sym o))) x) y) 
-    | o `elem` concat ops  = Just (x, o, y)
-isInline _ = Nothing
+data Match = Match JExpr Patt JExpr deriving (Show)
 
 instance ToJExpr Match where
 
@@ -1123,31 +1189,46 @@ instance ToJExpr Match where
 
     |]
 
+-------------------------------------------------------------------------------
+
     toJExpr (Match val (ValPatt (ConVal (TypeSym (TypeSymP s)))) scope) =
 
         [jmacroE| `(val)`.type == `(s)` |]
 
-    toJExpr (Match val (ConPatt (TypeSymP sym) ps) scope) =
+    toJExpr (Match val (ConPatt (TypeSymP sym) ps) scope) = [jmacroE|
 
-        [jmacroE| `(val)`.type == `(sym)` && (function() {
+        `(val)`.type == `(sym)` && (function() {
 
-                // going to need to zip with each arg
-                var result = true;
-                for (var arg in `(val)`.attrs) {
-                    var argg = `(val)`.attrs[arg];
-                    result = result && `(conds argg ps scope)`;
-                }
-                return result;
-            })() |]
+            var result = true;
 
-    toJExpr x = error (show x)
+            for (var arg in `(val)`.attrs) {
+                var argg = `(val)`.attrs[arg];
+                result = result && `(conds argg ps scope)`;
+            }
 
-conds _ [] _ = [jmacroE| true |]
-conds val (x : xs) scope = [jmacroE|
+            return result;
 
-    `(Match val x scope)` && `(conds val xs scope)`
+        })()
 
-|]
+    |] where
+
+        conds _ [] _ = [jmacroE| true |]
+        conds val (x : xs) scope = [jmacroE|
+
+            `(Match val x scope)` && `(conds val xs scope)`
+
+        |]
+
+-------------------------------------------------------------------------------
+
+-- TODO show the examples working!
+
+-------------------------------------------------------------------------------
+
+-- THE END
+
+-------------------------------------------------------------------------------
+
 
 -- UTILS
 
@@ -1156,6 +1237,27 @@ toText = Right . show . renderJs
 
 unwrap (Right x) = putStrLn x        >> putStrLn "----------------------"
 unwrap (Left x)  = putStrLn (show x) >> putStrLn "----------------------"
+
+deriving instance (Show a) => Show (Type a)  
+deriving instance (Show a) => Show (TypeVar a)  
+deriving instance (Show a) => Show (TypeSym a)  
+deriving instance (Show a) => Show (TypeSch a)  
+
+deriving instance (Eq a) => Eq (Type a)  
+deriving instance (Eq a) => Eq (TypeVar a)  
+deriving instance (Eq a) => Eq (TypeSym a)  
+deriving instance (Eq a) => Eq (TypeSch a)
+
+main :: IO ()
+main = do
+
+    source <- head <$> getArgs
+    case compile source of
+        Left  e  -> print e
+        Right js -> putStrLn js
+
+
+
 
 -- V. Wrap up, run the samples from the intro.
 
