@@ -26,10 +26,17 @@
 
 ------------------------------------------------------------------------------
 
+-- I. Introduction
+-- ===============
+
 -- Why?
 
--- * Fun!
--- * ...
+--     * Fun!
+
+--     * ...
+
+--     * Profit!
+
 
 ------------------------------------------------------------------------------
 
@@ -45,26 +52,21 @@
 
 ------------------------------------------------------------------------------
 
--- There is one module.  We'll need the environment to take input, and a
--- handful of elements from the `containers` and `mtl` libraris. 
+-- There is one module.  We'll need a few elements from `System` for
+-- handling the plumbing aspects, and a handful of elements from the
+-- `containers` and `mtl` libraries. 
 
 module Main where
 
+import System.IO
+import System.Process
 import System.Environment
 
 import Control.Applicative
 import Control.Monad
 import Control.Monad.State
 import Control.Arrow
-
-
 import Control.Concurrent
-
-import System.Exit
-import System.IO
-import System.Process
-import System.Directory
-
 
 import qualified Data.List as L
 
@@ -82,17 +84,31 @@ import Language.Javascript.JMacro
 
 ------------------------------------------------------------------------------
 
--- The language itself will be a simple expression language
+-- So what does this language look like?
 
 samplePrograms :: [String]
-samplePrograms = [
+samplePrograms  = [
 
 ------------------------------------------------------------------------------
 
--- Simple types and infix operators will compile to their identical 
+-- Simple values and infix operators will compile to their identical 
 -- underlying implementations.  Yes, that means there are only `Num`s!
 
     "   2 + 2.0 == 4.0   ",
+
+-- * Infix operators directly from Javascript.
+-- * Whole program evaluates to a single value.
+-- * Primitive syntax similar to Javascript.
+
+------------------------------------------------------------------------------
+
+-- The language is typed, but there are no type annotations
+-- (except in data constructors, more to follow ...).
+
+    "   4 + \"whoops\"   ", 
+
+-- * Strong statically typed, fully inferred.
+-- * Whole program can be said to have a unique type - in this case `Num`
 
 ------------------------------------------------------------------------------
 
@@ -102,12 +118,21 @@ samplePrograms = [
     "   let x = 1.0;     \
     \   x + 1.0 == 2.0   ",
 
+-- A `let` expression must introduce a body, so eg:
+
+    "   let x = 1;   ",
+
+-- is syntactically illegal.
+
 ------------------------------------------------------------------------------
 
 -- Functions - we'll refer to this as "Abstraction" to sound cool!
 -- Also pictured: prefix application.
 
     "   (fun x -> x + 4) 2 == 6   ",
+
+    "   let g = fun x -> x + 4;   \
+    \   g 2 == 6                  ",
 
 ------------------------------------------------------------------------------
 
@@ -120,11 +145,16 @@ samplePrograms = [
     \       n -> fib (n - 1) + fib (n - 2);;   \
     \   fib 7                                  ",
 
+-- Also pictured - recursive reference `fib`.  Our pattern matching will
+-- infer appropriate types as well.
+
+    "   match 3 + 3 with \"gotcha\" -> false;   ",
+
 ------------------------------------------------------------------------------
 
--- User defined algebraic data type constructors.
--- (TODO Address GADTs - they are allowed syntactically, but our inference
--- algorithm will not check them correctly)
+-- User defined algebraic data type constructors.  The chosen syntax is
+-- different from most MLs - but is quite easy to translate to the data
+-- structure we will use to represent the inferred type of a sub expression.
 
     "   data Cons: forall a => a -> List a -> List a;   \
     \   data Nil: forall a => List a;                   \
@@ -134,24 +164,15 @@ samplePrograms = [
     \           Nil -> 0;                               \
     \           (Cons _ xs) -> 1 + length xs;;          \
     \                                                   \
-    \   length (Cons 1 (Cons 2 Nil))                    " ]
+    \   length (Cons 1 (Cons 2 Nil))                    ",
+
+-- This syntax does not permit GADTs - infering types in their presence is
+-- out of scope.
 
 ------------------------------------------------------------------------------
 
--- And of course, our language will not do dumb things while parsing
-
-brokenSamples :: [String]
-brokenSamples = [    
-
-    "   let letly = 4; (let func = fun x -> x + ((2)); func letly)   ",
-
-------------------------------------------------------------------------------
-
--- ... or while type checking
-
-    "   4 + \"whoops\"   ",
-
-    "   match 3 + 3 with \"gotcha\" -> false;   ",
+-- Our type inference algorithm will be able to track any polymorphic types
+-- introduced via `data`, and make sure they don't clash.
 
     "   data Just: forall a => a -> Maybe a;  \
     \   data None: forall a => Maybe a;       \
@@ -161,7 +182,9 @@ brokenSamples = [
 
 ------------------------------------------------------------------------------
 
--- ... or while generating javascript code.
+-- ... and in general, it will do sensible thigns.
+
+    "   let letly = 4; (let func = fun x -> x + ((2)); func letly)   ",
 
     "   let x = 3;                \
     \   let f = fun y -> y + x;   \
@@ -170,7 +193,8 @@ brokenSamples = [
 
 ------------------------------------------------------------------------------
 
--- Compiler Architecture
+-- 2. Compiler "Architecture"
+-- ==========================
 
 ------------------------------------------------------------------------------
 
@@ -182,19 +206,11 @@ compile = parseOhml >=> typeCheck >=> generateJs >=> toText
 
 newtype Err = Err String deriving Show
 
-
-------------------------------------------------------------------------------
-
--- The Abstract Syntax Tree, or AST in the 'biz.
-
 ------------------------------------------------------------------------------
 
 -- The Abstract Syntax Tree, or AST in the 'biz.
 -- We also say 'biz in da 'biz.
 
-------------------------------------------------------------------------------
-
--- The 10,000 ft view of an an OHML program is a simple expression. 
 -- Here, `AbsExpr` is an Abstraction, and `AppExpr` is an Application.
 
 data Expr where
@@ -204,13 +220,11 @@ data Expr where
     AppExpr :: Expr -> Expr -> Expr                     -- f x
     AbsExpr :: Sym  -> Expr -> Expr                     -- fun x -> x
     VarExpr :: Val  -> Expr                             -- x
-    MatExpr :: Expr -> [(Patt, Expr)] -> Expr
+    MatExpr :: Expr -> [(Patt, Expr)] -> Expr           -- match 2 with x -> x
 
     deriving (Show)
 
--- (Note: We use GADT syntax solely for clarity - even though
--- this is not necessary)
-
+-- (Note: We use GADT syntax solely for clarity)
     
 ------------------------------------------------------------------------------
 
@@ -236,10 +250,6 @@ data Val where
     ConVal  :: Type () -> Val
 
     deriving (Show)
-
-------------------------------------------------------------------------------
-
--- Symbols and literals, yada yada yada.
 
 newtype Sym = Sym String deriving (Show, Eq)
 
@@ -275,8 +285,8 @@ data TypeSch a where
 
 ------------------------------------------------------------------------------
 
--- This means we can incrementally 
--- This ensures that any `Type a` will be consistent.
+-- This ensures that any `Type a` will be consistent, and allows us to
+-- generate 2 types of `Type a` which share most of their structure.
 
 data Type a where
 
@@ -286,30 +296,19 @@ data Type a where
 
     TypeGen :: Int -> Type Kind            -- forall a. a
 
--- But what the heck's a `Kind`?
+-- But what the heck's a `Kind`?  More to follow ...
 
 ------------------------------------------------------------------------------
 
--- TODO a few demonstation expressions w/ translations.
-
-------------------------------------------------------------------------------
-
--- Parsing With Prejudice 
-
-------------------------------------------------------------------------------
+-- C. Parsing With Prejudice
+-- =========================
 
 -- ... goes to Hackage, downloads Parsec ...
-
-------------------------------------------------------------------------------
 
 -- What is a Parser?  Well, this is a pretty good definition, which allows us
 -- to define some combinators that also produce `MyParser`
 
 type MyParser a = String -> Either Err (a, String)
-
-------------------------------------------------------------------------------
-
--- TODO Explain `Parser` and `GenParser`
 
 ------------------------------------------------------------------------------
 
@@ -325,10 +324,6 @@ parseOhml = left (Err . show) . parse grammar "Parsing OHML"
 
 ------------------------------------------------------------------------------
 
--- TODO Explain combinators `*>` and `<*`
-
-------------------------------------------------------------------------------
-
 -- There is some static info we need to define about OHML.  The language
 -- keywords ...
 
@@ -336,7 +331,8 @@ keywords = [ "let", "fun", "match", "with", "data" ]
 
 -- ... and operators, arranged in precedence order.
 
-ops = [ [ "^" ]
+ops = [ [ "" ]
+      , [ "^" ]
       , [ "*", "/" ]
       , [ "+", "-" ]
       , [ "<", "<=", ">=", ">", "==", "!=" ]
@@ -364,14 +360,12 @@ T.TokenParser { .. } = T.makeTokenParser ohmlDef
 grammar :: Parser Expr
 grammar = spaces *> exprP <* eof
 
---       (spaces *> exprP) <* eof
-
 -- Applicative functor combinators are left associative - so is
 -- function application!
 
 ------------------------------------------------------------------------------
 
--- The simplest parsers are for `Sym` and `TypeSym`
+-- The simplest parsers are for `Sym` and `TypeSym`.
 
 symP :: Parser Sym
 symP = Sym <$> identifier
@@ -379,15 +373,12 @@ symP = Sym <$> identifier
 typSymP :: Parser (TypeSym ())
 typSymP = (TypeSymP .) . (:) <$> upper <*> identifier
 
--- "Alternative" combinator will evaluate to its second argument, iff
--- it's first argument fails and consumes no input - backtracking is explicit
--- via `try`.
+-- A neat product of the Parsec's combinator API is that the elemental
+-- parsers you expose are themselves full parsers, so they're easy to test.
 
-valP :: Parser Val
-valP =
-    (SymVal <$> symP)
-        <|> (LitVal <$> litP) 
-        <|> ConVal . TypeSym <$> typSymP
+test_symP = testP symP <$> [ "func", "lett", "f", "concat_map" ]
+test_typSymP = testP typSymP <$> [ "Boolean", "String" ]
+
 
 ------------------------------------------------------------------------------
 
@@ -405,6 +396,22 @@ litP = stringL <|> numL
         toDouble (Left i)  = fromInteger i
         toDouble (Right f) = f
 
+test_litP = testP litP <$> [ "1", "3.14", "\"Hello\"" ]
+
+------------------------------------------------------------------------------
+
+-- "Alternative" combinator will evaluate to its second argument, iff
+-- it's first argument fails and consumes no input - backtracking is explicit
+-- via `try`.
+
+valP :: Parser Val
+valP =
+    (SymVal <$> symP)
+        <|> (LitVal <$> litP) 
+        <|> ConVal . TypeSym <$> typSymP
+
+test_valP = testP valP <$> [ "1.0", "\"test\"", "True", "x" ]
+
 ------------------------------------------------------------------------------
 
 -- Pattern parser introduces `parens` and `many`
@@ -418,6 +425,10 @@ pattP =
         valPattP = ValPatt <$> valP
         conPattP = flip ConPatt [] <$> typSymP
         conPatsP = ConPatt <$> typSymP <*> many pattP <|> pattP
+
+-- Patterns compose everything we've seen so far
+
+test_pattP = testP pattP <$> [ "True", "(Cons x Nil)", "2" ]
 
 ------------------------------------------------------------------------------
 
@@ -482,41 +493,16 @@ exprP =
 
         appExprP =
 
-            genExprP opConst AssocLeft ops termP <?> "Application"
+            buildExpressionParser opPs termP <?> "Application"
 
             where
-                valExprP =
-                    VarExpr <$> valP <?> "Value"
-                termP =
-                    (valExprP <|> parens exprP) `chainl1` return AppExpr
-                opConst =
-                    (AppExpr .) . AppExpr . VarExpr . SymVal . Sym 
+                opPs =
+                    [[ Infix (reserved "" >> return AppExpr) AssocLeft ]]
+                        ++ toInfixTerm opConst AssocLeft (tail ops)
 
-------------------------------------------------------------------------------
-
--- TODO explain this crap
-
-ifx op assoc =
-
-    map $ map
-        $ flip Infix assoc 
-        . uncurry (*>) 
-        . (reservedOp &&& return . op)
-
-genExprP =
-
-    ((buildExpressionParser .) .) . ifx
-
-------------------------------------------------------------------------------
-
-typP :: Parser (Type ())
-typP = typAppP <?> "Type Symbol"
-
-    where
-        typAppP = genExprP fnConst AssocRight [[ "->" ]] termP
-        fnConst = (TypeApp .) . TypeApp . TypeSym . TypeSymP
-        termP   = (typVarP <|> TypeSym <$> typSymP) `chainl1` return TypeApp
-        typVarP = TypeVar . TypeVarP <$> identifier <?> "Type Variable"
+                valExprP = VarExpr <$> valP <?> "Value"
+                termP = valExprP <|> parens exprP
+                opConst = (AppExpr .) . AppExpr . VarExpr . SymVal . Sym 
 
 ------------------------------------------------------------------------------
 
@@ -529,18 +515,35 @@ typSchP =
         <*> typP
         <?> "Type (TypeSch Kind)"
 
+typP :: Parser (Type ())
+typP = buildExpressionParser opPs termP <?> "Type Symbol"
+
+    where
+        opPs =
+            [ [Infix (spaces >> return TypeApp) AssocLeft]
+            , [Infix (reservedOp "->" >> return (fnConst "->")) AssocRight] ]
+
+        fnConst = (TypeApp .) . TypeApp . TypeSym . TypeSymP
+        termP   = typVarP <|> TypeSym <$> typSymP
+        typVarP = TypeVar . TypeVarP <$> identifier <?> "Type Variable"
+
 ------------------------------------------------------------------------------
 
 -- ... and that's it!
 
 ------------------------------------------------------------------------------
 
--- III. Type Inference.
+-- CHAPTER FOUR: Type Inference
+-- ============================
+
+-- Type checking is a broad subject - this is a very simple implementation
+-- which neverthless allows for much of the expressiveness you may be
+-- famliar with in Haskell.
 
 ------------------------------------------------------------------------------
 
 -- We're going to borrow the approach taken in "Typing Haskell in 
--- Haskell" (1).  The type of a OHML program will be computed in via
+-- Haskell" (1).  The type of a OHML program will be computed via
 -- the `StateT` monad transformer, which will hide our substitution
 -- environment and unique type variable generator.
 
@@ -568,10 +571,16 @@ data Kind where
 
     deriving (Eq, Show)
 
--- Examples:
---     Int  :: *
---     List :: * -> *
---     Map  :: * -> * -> *
+-- Some examples of our new `Type Kind` vocabulary. Tidy!
+
+--     Double  :: *
+--     List    :: * -> *
+--     (->)    :: * -> * -> *
+
+tString  = TypeSym (TypeSymT Star "String" )
+tBool    = TypeSym (TypeSymT Star "Boolean")
+tDouble  = TypeSym (TypeSymT Star "Double" )
+tArrow   = TypeSym (TypeSymT (Kfun Star (Kfun Star Star)) "->")
 
 ------------------------------------------------------------------------------
 
@@ -606,22 +615,7 @@ toKind (TypeVar (TypeVarP n)) k = TypeVar (TypeVarT k n)
 toKind (TypeApp f x) k =
     TypeApp (toKind f (Kfun Star k)) (toKind x Star)
 
-------------------------------------------------------------------------------
-
--- Some familiar types defined in out new vocabulary.  Tidy!
-
-tString  = TypeSym (TypeSymT Star "String" )
-tBool    = TypeSym (TypeSymT Star "Boolean")
-tDouble  = TypeSym (TypeSymT Star "Double" )
-tList    = TypeSym (TypeSymT (Kfun Star Star) "[]")
-tArrow   = TypeSym (TypeSymT (Kfun Star (Kfun Star Star)) "->")
-
-infixr 4 `fn`
-
-fn :: Type Kind -> Type Kind -> Type Kind
-fn = TypeApp . TypeApp tArrow
-
-------------------------------------------------------------------------------
+---------------------------------------------------------------------------
 
 -- We need the ability to generate unique type variables 
 
@@ -712,8 +706,8 @@ mgu t u = uniErr "types do not unify" t u
 varBind :: TypeVar Kind -> Type Kind -> TypeCheck Subst
 varBind u t 
     | t == TypeVar u     = return []
-    | u `elem` getVars t = uniErr "occurs check failed" t u  -- (2)
-    | kind u /= kind t   = uniErr "kinds do not match"  t u  -- (1)
+    | u `elem` getVars t = uniErr "occurs check failed" u t -- (2)
+    | kind u /= kind t   = uniErr "kinds do not match"  u t -- (1)
     | otherwise          = return [(u, t)]            
 
 ------------------------------------------------------------------------------
@@ -734,7 +728,7 @@ unify t1 t2 = do
 
 -- Consider the program
 
-test_generalization = ohml
+test_generalization = ohml 
 
     "   let f = fun x -> x;               \
     \   f 1 == f 1                        \
@@ -787,7 +781,7 @@ freshInst (TypeSchT ks qt) = do
     where
         inst ts (TypeApp l r) = TypeApp (inst ts l) (inst ts r)
         inst ts (TypeGen n) = ts !! n
-        inst ts t = t
+        inst _ t = t
 
 ------------------------------------------------------------------------------
 
@@ -945,8 +939,8 @@ exprCheck as (TypExpr (TypeSymP name) typSch expr) = do
 
 ------------------------------------------------------------------------------
 
--- Code Generation
--- ===============
+-- e.) Code Generation
+-- ===================
 
 -- The Noisy Killer.
 
@@ -960,7 +954,7 @@ exprCheck as (TypExpr (TypeSymP name) typSch expr) = do
 --    Javascript either in an ad-hoc fashion or as the backend to a compiler
 --    or EDSL. (1)
 
--- Sounds useful, if only we were in teh midst of writing a Javascript
+-- Sounds useful, if only we were in the midst of writing a Javascript
 -- compiler backend ...
 
 -- (1) http://www.haskell.org/haskellwiki/Jmacro
@@ -1247,6 +1241,13 @@ deriving instance (Eq a) => Eq (TypeSch a)
 
 ------------------------------------------------------------------------------
 
+infixr 4 `fn`
+
+fn :: Type Kind -> Type Kind -> Type Kind
+fn = TypeApp . TypeApp tArrow
+
+------------------------------------------------------------------------------
+
 -- Type errors
 
 typErr ::  String -> TypeCheck a
@@ -1259,6 +1260,21 @@ uniErr msg t u = typErr $
     msg ++ "\n  "
         ++ show u ++ " (" ++ show (kind u) ++ ") and " 
         ++ show t ++ " (" ++ show (kind t) ++ ")"
+
+------------------------------------------------------------------------------
+
+-- Parsing
+
+testP x = putStrLn . show . parse x "Test"
+
+
+toInfixTerm op assoc =
+
+    fmap . fmap $
+    flip Infix assoc
+        <<< uncurry (*>) 
+        <<< reservedOp
+        &&& return . op
 
 ------------------------------------------------------------------------------
 
