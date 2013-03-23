@@ -71,6 +71,7 @@ import Control.Arrow
 import Control.Concurrent
 
 import qualified Data.List as L
+import qualified Data.Set  as S
 
 ------------------------------------------------------------------------------
 
@@ -158,15 +159,15 @@ samplePrograms  = [
 -- different from most MLs - but is quite easy to translate to the data
 -- structure we will use to represent the inferred type of a sub expression.
 
-    "   data Cons: forall a => a -> List a -> List a;   \
-    \   data Nil: forall a => List a;                   \
-    \                                                   \
-    \   let length = fun n ->                           \
-    \       match n with                                \
-    \           Nil -> 0;                               \
-    \           (Cons _ xs) -> 1 + length xs;;          \
-    \                                                   \
-    \   length (Cons 1 (Cons 2 Nil))                    ",          -- 8
+    "   data Cons: a -> List a -> List a;        \
+    \   data Nil: List a;                        \
+    \                                            \
+    \   let length = fun n ->                    \
+    \       match n with                         \
+    \           Nil -> 0;                        \
+    \           (Cons _ xs) -> 1 + length xs;;   \
+    \                                            \
+    \   length (Cons 1 (Cons 2 Nil))             ",          -- 8
 
 -- This syntax does not permit GADTs - infering types in their presence is
 -- out of scope.
@@ -176,11 +177,11 @@ samplePrograms  = [
 -- Our type inference algorithm will be able to track any polymorphic types
 -- introduced via `data`, and make sure they don't clash.
 
-    "   data Just: forall a => a -> Maybe a;  \
-    \   data None: forall a => Maybe a;       \
-    \                                         \
-    \   match Just 5 with                     \
-    \       (Just \"blammo\") -> false;       ",                    -- 9
+    "   data Just: a -> Maybe a;          \
+    \   data None: Maybe a;               \
+    \                                     \
+    \   match Just 5 with                 \
+    \       (Just \"blammo\") -> false;   ",                    -- 9
 
 ------------------------------------------------------------------------------
 
@@ -206,7 +207,7 @@ samplePrograms  = [
 compile :: String -> Either Err String
 compile = parseOhml >=> typeCheck >=> generateJs >=> toText
 
-newtype Err = Err String deriving Show
+newtype Err = Err String
 
 ------------------------------------------------------------------------------
 
@@ -217,7 +218,7 @@ newtype Err = Err String deriving Show
 
 data Expr where
 
-    TypExpr :: TypeSym () -> TypeSch () -> Expr -> Expr -- data True: Bool
+    TypExpr :: TypeSym () -> TypeAbs () -> Expr -> Expr -- data True: Bool
 
     LetExpr :: Sym -> Expr -> Expr -> Expr    -- let x = 4; x
     AppExpr :: Expr -> Expr -> Expr           -- f x
@@ -282,9 +283,9 @@ data TypeSym a where
     TypeSymP :: String -> TypeSym ()
     TypeSymT :: Kind -> String -> TypeSym Kind
 
-data TypeSch a where
-    TypeSchP :: [TypeVar ()] -> Type () -> TypeSch ()
-    TypeSchT :: [Kind] -> Type Kind -> TypeSch Kind
+data TypeAbs a where
+    TypeAbsP :: Type () -> TypeAbs ()
+    TypeAbsT :: [Kind] -> Type Kind -> TypeAbs Kind
 
 ------------------------------------------------------------------------------
 
@@ -491,7 +492,7 @@ exprP =
         typExprP =
             pure TypExpr    <*  reserved "data"
                 <*> typSymP <*  reserved ":"
-                <*> typSchP <*  semi
+                <*> typAbsP <*  semi
                 <*> exprP   <?> "Type Kind Expression"
 
 ------------------------------------------------------------------------------
@@ -506,7 +507,7 @@ exprP =
                         ++ toInfixTerm opConst AssocLeft (tail ops)
 
 -- We use this function to construct the compelx data structure used by
--- buildExpressionParser
+-- buildExpressionParser.
 
                 toInfixTerm op assoc =
                     fmap . fmap $ 
@@ -523,14 +524,8 @@ exprP =
 
 -- Putting it all together in one parser ...
 
-typSchP :: Parser (TypeSch ())
-typSchP =
-    pure (TypeSchP . (:[]) . TypeVarP)
-        <*  reserved "forall"
-        <*> identifier
-        <*  reservedOp "=>"
-        <*> typP
-        <?> "Type (TypeSch Kind)"
+typAbsP :: Parser (TypeAbs ())
+typAbsP = TypeAbsP <$> typP <?> "Type (TypeAbs Kind)"
 
 typP :: Parser (Type ())
 typP = buildExpressionParser opPs termP <?> "Type Symbol"
@@ -613,7 +608,7 @@ data Kind where
     Star :: Kind
     Kfun :: Kind -> Kind -> Kind
 
-    deriving (Eq, Show)
+    deriving (Eq, Show, Ord)
 
 -- Some examples of our new `Type Kind` vocabulary. Tidy!
 
@@ -654,11 +649,11 @@ instance HasKind (TypeSym Kind) where
 -- extrapolate the Kinds of it's constituent parts through structural
 -- inspection.
 
-toKind :: Type () -> Kind -> Type Kind
-toKind (TypeSym (TypeSymP n)) k = TypeSym (TypeSymT k n)
-toKind (TypeVar (TypeVarP n)) k = TypeVar (TypeVarT k n)
-toKind (TypeApp f x) k =
-    TypeApp (toKind f (Kfun Star k)) (toKind x Star)
+toKind :: Kind -> Type () -> Type Kind
+toKind k (TypeSym (TypeSymP n)) = TypeSym (TypeSymT k n)
+toKind k (TypeVar (TypeVarP n)) = TypeVar (TypeVarT k n)
+toKind k (TypeApp f x) =
+    TypeApp (toKind (Kfun Star k) f) (toKind Star x)
 
 ------------------------------------------------------------------------------
 
@@ -670,7 +665,7 @@ toKind (TypeApp f x) k =
 -- current `Subst` to know the real type of a symbol given the total 
 -- information known so far.
 
-data Ass = String :>: TypeSch Kind
+data Ass = String :>: TypeAbs Kind
 
 -- There are some symbols which are implicit on our language, and they look
 -- like this:
@@ -678,17 +673,17 @@ data Ass = String :>: TypeSch Kind
 prelude :: [Ass]
 prelude =
 
-    [ "==" :>: TypeSchT [Star] (TypeGen 0 `fn` TypeGen 0 `fn` tBool)
-    , "&&" :>: TypeSchT [] (tBool `fn` tBool `fn` tBool)
-    , "+"  :>: TypeSchT [] (tDouble `fn` tDouble `fn` tDouble)
-    , "-"  :>: TypeSchT [] (tDouble `fn` tDouble `fn` tDouble) ]
+    [ "==" :>: TypeAbsT [Star] (TypeGen 0 `fn` TypeGen 0 `fn` tBool)
+    , "&&" :>: TypeAbsT [] (tBool `fn` tBool `fn` tBool)
+    , "+"  :>: TypeAbsT [] (tDouble `fn` tDouble `fn` tDouble)
+    , "-"  :>: TypeAbsT [] (tDouble `fn` tDouble `fn` tDouble) ]
 
 ------------------------------------------------------------------------------
 
 -- When we encounter a symbol, we just look it up in the list of assumptions.
 -- This is a convenient opportunity to check for undefined symbols!
 
-find :: String -> [Ass] -> TypeCheck (TypeSch Kind)
+find :: String -> [Ass] -> TypeCheck (TypeAbs Kind)
 find i [] = typErr ("Unbound identifier: " ++ i)
 find i ((i' :>: sc) : as) 
     | i == i'   = return sc
@@ -737,9 +732,9 @@ instance Substitute Ass where
     apply s (i :>: sc) = i :>: (apply s sc)
     getVars (_ :>: sc) = getVars sc
 
-instance Substitute (TypeSch Kind) where
-    apply s (TypeSchT ks qt) = TypeSchT ks (apply s qt)
-    getVars (TypeSchT _ qt)  = getVars qt
+instance Substitute (TypeAbs Kind) where
+    apply s (TypeAbsT ks qt) = TypeAbsT ks (apply s qt)
+    getVars (TypeAbsT _ qt)  = getVars qt
 
 ------------------------------------------------------------------------------
 
@@ -805,12 +800,12 @@ test_generalization = ohml
 
 -- Simple generalization is simply the process of replacing some type
 -- variables with `TypeGen`, whose integer argument represents the index
--- in the `TypeSch Kind`s argument list.  This somewhat odd representation
--- will make it easier to instantiate `TypeSch Kind`s later, as we can figure
+-- in the `TypeAbs Kind`s argument list.  This somewhat odd representation
+-- will make it easier to instantiate `TypeAbs Kind`s later, as we can figure
 -- out what `Kind` to assign to a fresh `TypeVar Kind`.
 
-quantify :: [TypeVar Kind] -> Type Kind -> TypeSch Kind
-quantify vars typ = TypeSchT kinds (apply subs typ)
+quantify :: [TypeVar Kind] -> Type Kind -> TypeAbs Kind
+quantify vars typ = TypeAbsT kinds (apply subs typ)
     where
         qVars = [ var | var <- getVars typ, var `elem` vars ]
         kinds = map kind qVars
@@ -822,7 +817,7 @@ quantify vars typ = TypeSchT kinds (apply subs typ)
 -- applies the current substitution and only generalizes the free `TypeVar`s
 -- in `valT`.
 
-generalize :: [Ass] -> Type Kind -> TypeCheck (TypeSch Kind)
+generalize :: [Ass] -> Type Kind -> TypeCheck (TypeAbs Kind)
 generalize as valT = do
 
     subs <- fst <$> get 
@@ -835,8 +830,8 @@ generalize as valT = do
 
 -- ... and instantiating them again.
 
-freshInst :: TypeSch Kind -> TypeCheck (Type Kind)
-freshInst (TypeSchT ks qt) = do
+freshInst :: TypeAbs Kind -> TypeCheck (Type Kind)
+freshInst (TypeAbsT ks qt) = do
 
     ts <- mapM newTypeVar ks
     return (inst ts qt)
@@ -870,12 +865,12 @@ pattCheck _ (ValPatt (LitVal l)) =
 
 pattCheck _ (ValPatt (SymVal (Sym s))) = do
     t <- newTypeVar Star
-    return ([ s :>: TypeSchT [] t ], t)
+    return ([ s :>: TypeAbsT [] t ], t)
 
 ------------------------------------------------------------------------------
 
 -- Simple constructor patterns can be checked by introducing a fresh 
--- instance of their `TypeSch Kind`.  
+-- instance of their `TypeAbs Kind`.  
 
 pattCheck as (ValPatt (ConVal (TypeSym (TypeSymP l)))) = do
     sc <- find l as
@@ -890,7 +885,7 @@ pattCheck as (ValPatt (ConVal (TypeSym (TypeSymP l)))) = do
 
 pattCheck as (ConPatt (TypeSymP con) ps) = do
     sc <- find con as
-    x  <- sequence (map (pattCheck as) ps)
+    x  <- mapM (pattCheck as) ps
     t' <- newTypeVar Star
     t  <- freshInst sc
     unify t (foldr fn t' (map snd x))
@@ -922,7 +917,7 @@ exprCheck as (VarExpr (ConVal (TypeSym (TypeSymP sym)))) =
 --  Γ ⊦ x : σ
 
 -- where
---  σ    = a type scheme, `TypeSch Kind`
+--  σ    = a type scheme, `TypeAbs Kind`
 --  τ    = a type, `Type Kind`
 --  Γ    = a type environment, `TypeCheck a`
 --  ⊦     = an assertion.
@@ -931,17 +926,16 @@ exprCheck as (VarExpr (ConVal (TypeSym (TypeSymP sym)))) =
 
 ------------------------------------------------------------------------------
 
--- `TypExpr a` simply requres that we introduce a new assumption for this
+-- `TypExpr a` simply requires that we introduce a new assumption for this
 -- constructor.  We borrow part of our generalization mechanism to make
 -- these constructors fully polymorphic for all free type variables.
 
-exprCheck as (TypExpr (TypeSymP name) typSch expr) = do
-    exprCheck (name :>: toKSch typSch : as) expr
+exprCheck as (TypExpr (TypeSymP name) (TypeAbsP typ) expr) =
+    exprCheck (name :>: typKAbs : as) expr
 
     where
-        toVar (TypeVarP n) = TypeVarT Star n
-        toKSch (TypeSchP tvars typ) =
-            quantify (toVar <$> tvars) (toKind typ Star)
+        typK = toKind Star typ
+        typKAbs = quantify (getVars typK) typK
 
 ------------------------------------------------------------------------------
 
@@ -949,7 +943,7 @@ exprCheck as (TypExpr (TypeSymP name) typSch expr) = do
 
 exprCheck as (LetExpr (Sym sym) val expr) = do
     symT <- newTypeVar Star
-    valT <- exprCheck ((sym :>: TypeSchT [] symT) : as) val
+    valT <- exprCheck ((sym :>: TypeAbsT [] symT) : as) val
     unify valT symT
     schT <- generalize as valT 
     exprCheck (sym :>: schT : as) expr
@@ -982,7 +976,7 @@ exprCheck as (AppExpr f x) = do
 
 exprCheck as (AbsExpr (Sym sym) expr) = do
     symT <- newTypeVar Star
-    res  <- exprCheck (sym :>: TypeSchT [] symT : as) expr
+    res  <- exprCheck (sym :>: TypeAbsT [] symT : as) expr
     return (symT `fn` res)
 
 --  Γ, x : τ ⊦ e : τ'
@@ -1190,14 +1184,14 @@ instance ToJExpr Expr where
 -- capture arguments through the partial application.  This means we need to
 -- treat constructor functions and empty constructors differently.
 
-curriedFun :: String -> TypeSch () -> JExpr
+curriedFun :: String -> TypeAbs () -> JExpr
 
-curriedFun sym (TypeSchP vars (isFun -> Just (_, fs))) = [jmacroE|
+curriedFun sym (TypeAbsP (isFun -> Just (_, fs))) = [jmacroE|
 
     function(x) {
         var args = [];
         `(args)`.push(x); 
-        return `(curriedFun' sym args (TypeSchP vars fs))`;
+        return `(curriedFun' sym args (TypeAbsP fs))`;
     }
 
 |]
@@ -1208,11 +1202,11 @@ curriedFun sym ts = curriedFun' sym "" ts
 
 -- .. and then recurse as expected, passing the `args` accumulator down ...
 
-curriedFun' sym args (TypeSchP vars (isFun -> Just (_, fs))) = [jmacroE|
+curriedFun' sym args (TypeAbsP (isFun -> Just (_, fs))) = [jmacroE|
 
     function(x) {
         `(args)`.push(x); 
-        return `(curriedFun' sym args (TypeSchP vars fs))`;
+        return `(curriedFun' sym args (TypeAbsP fs))`;
     }
 
 |]
@@ -1342,21 +1336,23 @@ isFun _ = Nothing
 
 -- GADT deriving
 
+deriving instance (Ord a) => Ord (TypeVar a)
+
 deriving instance (Show a) => Show (Type a)  
 deriving instance (Show a) => Show (TypeVar a)  
 deriving instance (Show a) => Show (TypeSym a)  
-deriving instance (Show a) => Show (TypeSch a)  
+deriving instance (Show a) => Show (TypeAbs a)  
 
 deriving instance (Eq a) => Eq (Type a)  
 deriving instance (Eq a) => Eq (TypeVar a)  
 deriving instance (Eq a) => Eq (TypeSym a)  
-deriving instance (Eq a) => Eq (TypeSch a)
+deriving instance (Eq a) => Eq (TypeAbs a)
 
 ------------------------------------------------------------------------------
 
 -- Type errors
 
-typErr ::  String -> TypeCheck a
+typErr :: String -> TypeCheck a
 typErr = lift . Left . Err
 
 uniErr :: (HasKind t, Show t, HasKind u, Show u) => 
@@ -1366,6 +1362,10 @@ uniErr msg t u = typErr $
     msg ++ "\n  "
         ++ show u ++ " (" ++ show (kind u) ++ ") and " 
         ++ show t ++ " (" ++ show (kind t) ++ ")"
+
+instance Show Err where
+
+    show (Err x) = "ERROR " ++ x
 
 ------------------------------------------------------------------------------
 
@@ -1388,10 +1388,22 @@ node js = do
     
     return ()
 
+------------------------------------------------------------------------------
+test_kind = ohml
+
+    "   data App: forall f => forall x => f x -> App f x;   \
+    \   App 10                                              "
+
+
 ohml :: String -> IO ()
-ohml x = case compile x of
-    Right x -> node x >> putStrLn ""
-    Left y -> putStrLn (show y) >> putStrLn ""
+ohml x = do
+    putStr "Program:  "
+    putStrLn $ concat $ L.intersperse " " $ words x
+    putStr "Node.js:  "
+    case compile x of
+        Right x -> node x
+        Left y  -> putStrLn (show y)
+    putStrLn ""
 
 ------------------------------------------------------------------------------
 
