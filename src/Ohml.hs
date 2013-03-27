@@ -19,6 +19,9 @@
 -- (5) [OHML]
 --     (https://github.com/texodus/ohml)
 
+-- (6) [Forml]
+--     (http://http://texodus.github.com/forml)
+
 ------------------------------------------------------------------------------
 
 --       --==>  http://http://texodus.github.com/forml/  <==--
@@ -110,7 +113,8 @@ samplePrograms  = [
     "   4 + \"whoops\"   ",                                         -- 1
 
 -- * Strong statically typed, fully inferred.
--- * Whole program can be said to have a unique type - in this case `Num`
+-- * Whole program can be said to have a unique type - in this case `Num`.
+-- * Language semantics guarantee a principal type.
 
 ------------------------------------------------------------------------------
 
@@ -232,7 +236,7 @@ newtype Err = Err String
 
 -- Here, `AbsExpr` is an Abstraction, and `AppExpr` is an Application.
 
-data Expr = TypExpr TypeSym TypeAbs Expr   -- data True: Bool
+data Expr = DatExpr TypeSym TypeAbs Expr   -- data True: Bool
           | LetExpr Sym Expr Expr          -- let x = 4; x
           | AppExpr Expr Expr              -- f x
           | AbsExpr Sym Expr               -- fun x -> x
@@ -253,10 +257,6 @@ data Patt = ValPatt Val
           | ConPatt TypeSym [Patt]
 
     deriving (Show)
-
-------------------------------------------------------------------------------
-
--- ... which looks like this.
 
 data Val = SymVal Sym
          | LitVal Lit
@@ -429,7 +429,7 @@ exprP :: Parser Expr
 exprP =
 
     letExprP
-        <|> typExprP
+        <|> datExprP
         <|> absExprP 
         <|> matExprP 
         <|> appExprP 
@@ -468,7 +468,7 @@ exprP =
 
 ------------------------------------------------------------------------------
 
--- `LetExpr` and `TypExpr` are roughly identical; here they've been arranged
+-- `LetExpr` and `DatExpr` are roughly identical; here they've been arranged
 -- slightly differently to show the symmetry between function application
 -- & combinators of the `Applicative` type class.
 
@@ -478,15 +478,15 @@ exprP =
                 <*> exprP <*  semi
                 <*> exprP <?> "Let Expression"
 
-        typExprP =
-            pure TypExpr    <*  reserved "data"
+        datExprP =
+            pure DatExpr    <*  reserved "data"
                 <*> typSymP <*  reserved ":"
                 <*> typAbsP <*  semi
                 <*> exprP   <?> "Type Expression"
 
 ------------------------------------------------------------------------------
 
--- TODO 
+-- `buildExpressionParser` does the heavy lifting of 
 
         appExprP = buildExpressionParser opPs termP <?> "Application"
 
@@ -495,7 +495,7 @@ exprP =
                     [[ Infix (spaces >> return AppExpr) AssocLeft ]]
                         ++ toInfixTerm opConst AssocLeft (tail ops)
 
--- We use this function to construct the compelx data structure used by
+-- We use this function to construct the complex data structure used by
 -- buildExpressionParser.
 
                 toInfixTerm op assoc =
@@ -862,7 +862,7 @@ exprCheck as (VarExpr (ConVal (TypeSym (TypeSymT sym)))) =
     find sym as >>= freshInst
 
 -- If you read a theoretical treatment of HM, you will encounter equations
--- that look like this.  The cases of `exprCheck` map directly to these
+-- that look like this.  The cases of `exprCheck` map roughly to these
 -- lifted from wikipedia:
 
 --  x : σ ∈ Γ
@@ -949,11 +949,11 @@ exprCheck as (MatExpr expr patts) = do
 
 ------------------------------------------------------------------------------
 
--- `TypExpr a` simply requires that we introduce a new assumption for this
+-- `DatExpr a` simply requires that we introduce a new assumption for this
 -- constructor.  We borrow part of our generalization mechanism to make
 -- these constructors fully polymorphic for all free type variables.
 
-exprCheck as (TypExpr (TypeSymT name) (TypeAbsT typ) expr) = do
+exprCheck as (DatExpr (TypeSymT name) (TypeAbsT typ) expr) = do
     checkValid typ
     checkMono typ
     exprCheck (name :>: typKAbs : as) expr
@@ -1133,7 +1133,7 @@ instance ToJExpr Expr where
 -- `TypeExpr`s require are the hardest so far, requiring us to construct
 -- a valid, curried constructor function for.  More to follow ...
 
-    toJExpr (TypExpr (TypeSymT sym) typsch expr) = [jmacroE|
+    toJExpr (DatExpr (TypeSymT sym) typsch expr) = [jmacroE|
 
         function() {
             var scheme = `(curriedFun sym typsch)`;
